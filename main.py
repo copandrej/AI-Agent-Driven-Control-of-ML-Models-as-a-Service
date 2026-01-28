@@ -6,21 +6,21 @@ from dotenv import load_dotenv
 from crewai import Agent, Task, Crew
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
-
 load_dotenv()
 
 # take from env for easy switching
-VERBOSE = os.getenv("VERBOSE", "False")
-
-
-KEEP_MESSAGES = int(os.getenv("KEEP_MESSAGES", 5))
+VERBOSE = os.getenv("VERBOSE", "False").lower() == "true"
+tracing = os.getenv("CREWAI_TRACING_ENABLED", "False").lower() == "true"
+KEEP_MESSAGES = int(os.getenv("KEEP_MESSAGES", 7))
 KEEP_FULL_OUTPUTS = int(os.getenv("KEEP_FULL_OUTPUTS", 2))
 
-# Memory settings
-KEEP_MESSAGES = 5  # How many old messages to show as context
-KEEP_FULL_OUTPUTS = 2  # How many of those should include full tool outputs (most recent)
-# with small llms we need to keep this number low.
-# full outputs are long because of tool updates
+if VERBOSE:
+    print("Configs:")
+    print(f"Verbose: {VERBOSE}")
+    print(f"Tracing: {tracing}")
+    print(f"KEEP_MESSAGES: {KEEP_MESSAGES}")
+    print(f"KEEP_FULL_OUTPUTS: {KEEP_FULL_OUTPUTS}")
+
 
 class KubectlInput(BaseModel):
     command: str = Field(..., description="kubectl command without 'kubectl' prefix")
@@ -132,7 +132,7 @@ def main():
         })
         
         # Trim history to prevent memory bloat
-        if len(conversation_history) > KEEP_MESSAGES + 2:  # Keep a bit extra in storage
+        if len(conversation_history) > KEEP_MESSAGES:
             conversation_history.pop(0)
         
         print(f"\nAgent: {result_str}\n")

@@ -1,5 +1,5 @@
 [project]
-name = "Distributed Systems Project Report: Agentic Kubernetes Management"
+name = "agentic_kubernetes"
 version = "0.1.0"
 description = "AI-powered agent system for managing Kubernetes clusters"
 readme = "README.md"
