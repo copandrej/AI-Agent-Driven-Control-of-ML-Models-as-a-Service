@@ -1,0 +1,21 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  # Echo service
+  - containerPort: 30080
+    hostPort: 30080
+    protocol: TCP
+  # MNIST service
+  - containerPort: 30081
+    hostPort: 30081
+    protocol: TCP
+  # Prometheus
+  - containerPort: 30090
+    hostPort: 30090
+    protocol: TCP
+  # Grafana
+  - containerPort: 30030
+    hostPort: 30030
+    protocol: TCP

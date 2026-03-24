@@ -1,0 +1,455 @@
+# Evaluation Task Set for MLOps Agent
+# 25 tasks across 3 complexity levels
+# Used by eval_runner.py for automated benchmarking
+
+# Level 1: General K8s operations (comparable to related work)
+# Level 2: ML-specific operations (thesis differentiator)
+# Level 3: Autonomous / multi-step (advanced autonomy)
+
+tasks:
+
+  # ── Level 1: General Kubernetes ─────────────────────────────────────
+
+  - id: L1-01
+    level: 1
+    category: general_k8s
+    description: List all running pods
+    prompt: "Show me all pods running in the cluster"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["pod", "running", "kube-system"]
+      cluster_check: null
+    setup_commands: []
+    cleanup_commands: []
+    comparable_to: [KubeIntellect, Yang_et_al]
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L1-02
+    level: 1
+    category: general_k8s
+    description: Describe a specific pod
+    prompt: "Describe the coredns pod in kube-system namespace"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["coredns", "kube-system", "running"]
+      cluster_check: null
+    setup_commands: []
+    cleanup_commands: []
+    comparable_to: [KubeIntellect, Yang_et_al]
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L1-03
+    level: 1
+    category: general_k8s
+    description: Check node resource usage
+    prompt: "Show me the resource usage of all nodes"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["cpu", "memory", "node"]
+      cluster_check: null
+    setup_commands: []
+    cleanup_commands: []
+    comparable_to: [KubeIntellect]
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L1-04
+    level: 1
+    category: general_k8s
+    description: Get all namespaces
+    prompt: "List all namespaces in the cluster"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["default", "kube-system", "namespace"]
+      cluster_check: null
+    setup_commands: []
+    cleanup_commands: []
+    comparable_to: [KubeIntellect, Yang_et_al]
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L1-05
+    level: 1
+    category: general_k8s
+    description: Deploy nginx with 2 replicas
+    prompt: "Create a deployment called eval-nginx with image nginx and 2 replicas"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["nginx", "created", "deploy"]
+      cluster_check:
+        command: "kubectl get deployment eval-nginx -o jsonpath='{.spec.replicas}'"
+        expected: "2"
+    setup_commands: []
+    cleanup_commands:
+      - "kubectl delete deployment eval-nginx --ignore-not-found"
+    comparable_to: [KubeIntellect, Yang_et_al, LADs]
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L1-06
+    level: 1
+    category: general_k8s
+    description: Delete a deployment
+    prompt: "Delete the deployment called eval-delete-me"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["delet", "remov", "eval-delete-me"]
+      cluster_check:
+        command: "kubectl get deployment eval-delete-me --ignore-not-found"
+        expected: ""
+    setup_commands:
+      - "kubectl create deployment eval-delete-me --image=nginx"
+      - "sleep 2"
+    cleanup_commands:
+      - "kubectl delete deployment eval-delete-me --ignore-not-found"
+    comparable_to: [KubeIntellect, Yang_et_al]
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L1-07
+    level: 1
+    category: general_k8s
+    description: Check cluster health
+    prompt: "Check the cluster health and show me any alerts"
+    expected_intent: monitor
+    success_criteria:
+      response_keywords: ["health", "running", "node", "pod", "status"]
+      cluster_check: null
+    setup_commands: []
+    cleanup_commands: []
+    comparable_to: [KubeIntellect, Yang_et_al]
+    manual_commands_saved: 2
+    manual_lines_saved: 0
+
+  - id: L1-08
+    level: 1
+    category: general_k8s
+    description: Get pod logs
+    prompt: "Show me the logs of the coredns pod in kube-system"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["coredns", "log", "dns"]
+      cluster_check: null
+    setup_commands: []
+    cleanup_commands: []
+    comparable_to: [KubeIntellect, Yang_et_al]
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L1-09
+    level: 1
+    category: general_k8s
+    description: Scale a deployment to 3 replicas
+    prompt: "Scale the eval-scale deployment to 3 replicas"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["scale", "3", "replica"]
+      cluster_check:
+        command: "kubectl get deployment eval-scale -o jsonpath='{.spec.replicas}'"
+        expected: "3"
+    setup_commands:
+      - "kubectl create deployment eval-scale --image=nginx"
+      - "sleep 2"
+    cleanup_commands:
+      - "kubectl delete deployment eval-scale --ignore-not-found"
+    comparable_to: [KubeIntellect, Yang_et_al]
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L1-10
+    level: 1
+    category: general_k8s
+    description: General greeting
+    prompt: "Hello, who are you and what can you help me with?"
+    expected_intent: general
+    success_criteria:
+      response_keywords: ["hello", "hi", "assist", "help", "mlops", "kubernetes"]
+      cluster_check: null
+    setup_commands: []
+    cleanup_commands: []
+    comparable_to: [KubeIntellect]
+    manual_commands_saved: 0
+    manual_lines_saved: 0
+
+  # ── Level 2: ML-Specific Operations ─────────────────────────────────
+
+  - id: L2-01
+    level: 2
+    category: ml_specific
+    description: Deploy MNIST service from manifest
+    prompt: "Deploy the MNIST inference service using the manifest in k8s/ml_service/deployment.yaml"
+    expected_intent: deploy
+    success_criteria:
+      response_keywords: ["mnist", "deploy", "applied", "created", "running"]
+      cluster_check:
+        command: "kubectl get deployment mnist-service -o jsonpath='{.status.availableReplicas}'"
+        expected: "1"
+    setup_commands:
+      - "kubectl delete deployment mnist-service --ignore-not-found"
+      - "kubectl delete service mnist-service --ignore-not-found"
+      - "sleep 2"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 2
+    manual_lines_saved: 50
+
+  - id: L2-02
+    level: 2
+    category: ml_specific
+    description: Check ML service health endpoint
+    prompt: "Check if the MNIST service is healthy by calling its health endpoint at http://localhost:30081/health"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["healthy", "health", "status", "model"]
+      cluster_check: null
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L2-03
+    level: 2
+    category: ml_specific
+    description: Send prediction request to MNIST service
+    prompt: "Send a prediction request to the MNIST service at http://localhost:30081/predict with a sample of 64 zero pixels"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["digit", "prediction", "confidence", "predict"]
+      cluster_check: null
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L2-04
+    level: 2
+    category: ml_specific
+    description: Update model version v1 to v2
+    prompt: "Update the MNIST service model to version v2"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["v2", "update", "version", "rollout", "image"]
+      cluster_check:
+        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
+        expected: "v2"
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands:
+      - "kubectl set image deployment/mnist-service mnist-service=mnist-service:v1"
+      - "sleep 3"
+    comparable_to: []
+    manual_commands_saved: 3
+    manual_lines_saved: 0
+
+  - id: L2-05
+    level: 2
+    category: ml_specific
+    description: Query inference metrics via Prometheus
+    prompt: "Query Prometheus for the total number of MNIST inference requests using mnist_requests_total"
+    expected_intent: monitor
+    success_criteria:
+      response_keywords: ["mnist_requests_total", "metric", "request", "prometheus"]
+      cluster_check: null
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 2
+    manual_lines_saved: 0
+
+  - id: L2-06
+    level: 2
+    category: ml_specific
+    description: Query P95 inference latency
+    prompt: "What is the P95 inference latency of the MNIST service?"
+    expected_intent: monitor
+    success_criteria:
+      response_keywords: ["latency", "p95", "percentile", "seconds", "histogram"]
+      cluster_check: null
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 2
+    manual_lines_saved: 0
+
+  - id: L2-07
+    level: 2
+    category: ml_specific
+    description: Scale MNIST service for high traffic
+    prompt: "The MNIST service is experiencing high traffic, scale it to 3 replicas"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["scale", "3", "replica", "mnist"]
+      cluster_check:
+        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.replicas}'"
+        expected: "3"
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands:
+      - "kubectl scale deployment mnist-service --replicas=1"
+    comparable_to: []
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L2-08
+    level: 2
+    category: ml_specific
+    description: Check current model version deployed
+    prompt: "What model version is currently deployed for the MNIST service?"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["v1", "v2", "version", "image", "mnist"]
+      cluster_check: null
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L2-09
+    level: 2
+    category: ml_specific
+    description: Get raw Prometheus metrics from service
+    prompt: "Scrape the raw metrics from the MNIST service at http://localhost:30081/metrics"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["mnist_requests_total", "mnist_request_latency", "metric"]
+      cluster_check: null
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 1
+    manual_lines_saved: 0
+
+  - id: L2-10
+    level: 2
+    category: ml_specific
+    description: Rollback model version from v2 to v1
+    prompt: "Rollback the MNIST service model from v2 back to v1"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["v1", "rollback", "version", "update", "image"]
+      cluster_check:
+        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
+        expected: "v1"
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "kubectl set image deployment/mnist-service mnist-service=mnist-service:v2"
+      - "sleep 5"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 3
+    manual_lines_saved: 0
+
+  # ── Level 3: Autonomous / Multi-Step ────────────────────────────────
+
+  - id: L3-01
+    level: 3
+    category: ml_specific
+    description: Diagnose CrashLoopBackOff pod
+    prompt: "There seems to be a problem with the eval-crasher deployment, can you diagnose what is wrong?"
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["crash", "error", "backoff", "log", "image", "pull"]
+      cluster_check: null
+    setup_commands:
+      - "kubectl create deployment eval-crasher --image=nonexistent-image:latest"
+      - "sleep 5"
+    cleanup_commands:
+      - "kubectl delete deployment eval-crasher --ignore-not-found"
+    comparable_to: [AIOpsLab]
+    manual_commands_saved: 3
+    manual_lines_saved: 0
+
+  - id: L3-02
+    level: 3
+    category: ml_specific
+    description: Detect and fix high latency by scaling
+    prompt: "The MNIST service latency is very high and users are complaining. Investigate the metrics and take action to fix it."
+    expected_intent: monitor
+    success_criteria:
+      response_keywords: ["latency", "scale", "replica", "performance", "action"]
+      cluster_check:
+        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.replicas}'"
+        expected: "2"
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands:
+      - "kubectl scale deployment mnist-service --replicas=1"
+    comparable_to: [AIOpsLab]
+    manual_commands_saved: 4
+    manual_lines_saved: 0
+
+  - id: L3-03
+    level: 3
+    category: ml_specific
+    description: Detect and restart crashed ML service pod
+    prompt: "The MNIST service pod seems to have crashed. Check it and restart it if needed."
+    expected_intent: ops
+    success_criteria:
+      response_keywords: ["restart", "delete", "rollout", "pod", "mnist"]
+      cluster_check: null
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "sleep 5"
+    cleanup_commands: []
+    comparable_to: [AIOpsLab]
+    manual_commands_saved: 3
+    manual_lines_saved: 0
+
+  - id: L3-04
+    level: 3
+    category: general_k8s
+    description: Full deploy pipeline with YAML generation
+    prompt: "Deploy a Redis cache service with 1 replica on port 6379 in the default namespace"
+    expected_intent: deploy
+    success_criteria:
+      response_keywords: ["redis", "deploy", "applied", "created", "6379"]
+      cluster_check:
+        command: "kubectl get deployment -o name"
+        expected: "redis"
+    setup_commands: []
+    cleanup_commands:
+      - "kubectl delete deployment -l app=redis --ignore-not-found"
+      - "kubectl delete service -l app=redis --ignore-not-found"
+    comparable_to: [KubeIntellect, LADs]
+    manual_commands_saved: 2
+    manual_lines_saved: 30
+
+  - id: L3-05
+    level: 3
+    category: ml_specific
+    description: Deploy, test health, update version, verify
+    prompt: "Deploy the MNIST service, verify it is healthy, then update it to model version v2 and confirm the new version is working"
+    expected_intent: deploy
+    success_criteria:
+      response_keywords: ["mnist", "healthy", "v2", "deploy", "version"]
+      cluster_check:
+        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
+        expected: "v2"
+    setup_commands:
+      - "kubectl delete deployment mnist-service --ignore-not-found"
+      - "kubectl delete service mnist-service --ignore-not-found"
+      - "sleep 2"
+    cleanup_commands: []
+    comparable_to: []
+    manual_commands_saved: 6
+    manual_lines_saved: 50

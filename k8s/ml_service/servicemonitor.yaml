@@ -1,0 +1,22 @@
+# ServiceMonitor for Prometheus Operator.
+# Deploy this when kube-prometheus-stack is available on the cluster.
+# Prometheus will automatically scrape /metrics from the MNIST service.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mnist-service-monitor
+  namespace: default
+  labels:
+    app: mnist-service
+    release: monitoring-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      app: mnist-service
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 15s

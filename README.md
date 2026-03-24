@@ -1,142 +1,124 @@
-# Master Thesis: AI-Agent-Driven-Control-of-ML-Models-as-a-Service
+# Master Thesis: AI-Agent-Driven Control of ML Models as a Service
 
-Agentic system for managing Kubernetes cluster based ML models as a service through natural language interactions.
+Agentic system for managing Kubernetes cluster-based ML models through natural language, with a terminal chatbot interface.
 
 ## Architecture
 
-- **Agent Framework**: CrewAI for agent orchestration
-- **LLM Provider**: Configurable, Probably openrouter with some free model or Ollama for local LLM
-- **Kubernetes**: Local cluster using Kind + kubectl command execution
-- **Interface**: Terminal-based chatbot for user interaction
-- **Implementation**: Simple Python app, uv for dependencies, modular, easy to extend as we will need for the master's thesis project later
+- **Flow Backbone**: CrewAI `Flow` with deterministic routing (`deploy`, `ops`, `monitor`, `ingress`, `general`)
+- **5 Specialized Agents**: Orchestrator, Coding, Ops, Monitoring, Ingress — each with bounded tool access
+- **Ablation Baselines**: single-agent with all tools (`simple`), kubectl-only (`minimal`)
+- **ML Service**: MNIST digit classification (sklearn, FastAPI, NodePort 30081)
+- **Observability**: Prometheus and Grafana integration (when endpoints are configured)
+- **Memory**: Optional scoped ChromaDB memory per agent
+- **Autonomous Mode**: Watch loop for self-healing (Level 3)
+
+## Project Structure
+
+```
+src/           — Agentic framework
+  agent.py     — Flow-first architecture (5 agents, deterministic routing, all tools)
+  simple.py    — Single-agent ablation baseline (all tools, no routing)
+  minimal.py   — Fully ablated baseline (kubectl only)
+  watch.py     — Autonomous watch mode (Level 3 self-healing loop)
+
+eval/          — Evaluation framework
+  tasks.yaml   — 25 benchmark tasks at L1/L2/L3 complexity
+  runner.py    — Automated eval harness (flow/simple/minimal architectures)
+  watch_eval.py — Fault injection evaluation for watch mode
+  load_test.py — Async load tester for measuring latency
+
+k8s/           — Cluster configuration & service manifests
+  kind-config.yaml       — Kind cluster config (NodePort mappings)
+  prometheus-values.yaml — Helm values for kube-prometheus-stack
+  echo_service/          — Test workload (FastAPI matrix multiply, NodePort 30080)
+  ml_service/            — MNIST inference service (NodePort 30081)
+
+main.py        — Entrypoint → src/agent.py
+watch.py       — Entrypoint → src/watch.py
+test_agent.py  — Unit + integration tests
+```
 
 ## Prerequisites
 
-- Python 3.10+
-- Docker
-- kubectl CLI
-- Kind (Kubernetes in Docker), or any Kubernetes cluster with kubectl access
-- uv (Python package manager), or pip
+- Python 3.10+, Docker, kubectl, uv
+- Kind (or any Kubernetes cluster)
+- Ollama (local LLM) or OpenRouter API key
 
+## Setup
 
-## Example interactions:
-```
-You: Check the health of all pods in the cluster
-Agent: Running health check... Found 5 pods, 4 running, 1 pending...
-
-You: Deploy an example hello world nginx service
-Agent: Creating deployment... Deployment successful!
-
-You: Increase the replicas of the nginx service to 3
-Agent: Scaling deployment... Now 3 replicas running.
-```
-
-## Installation
-
-### Install uv (Optional)
-
+**1. Create cluster:**
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+kind create cluster --name agent-cluster --config k8s/kind-config.yaml
 ```
 
-### Local Kubernetes
-
-To allow localhost access to NodePort services, create the cluster with the provided config:
-
+**2. Set up LLM** (Ollama example):
 ```bash
-kind create cluster --name agent-cluster --config kind-config.yaml
-```
-
-### Set Up LLM
-
-Set up Ollama (Local LLM) if needed or connect to OpenRouter (see `.env.example`).
-
-```bash
-# Run Ollama in Docker
 docker run -d -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama
 docker exec -it ollama ollama pull qwen3:8b
 ```
 
-### Configure Environment
-
-Copy `.env.example` to `.env` and set your API keys and model preferences:
-
+**3. Configure environment:**
 ```bash
 cp .env.example .env
+# Set LLM_PROVIDER=ollama or openrouter, add API keys if needed
 ```
 
-### Install Project Dependencies
-
-Using uv:
-
+**4. Install dependencies:**
 ```bash
 uv sync
 ```
 
-Using pip:
-
+**5. Deploy MNIST service:**
 ```bash
-pip install -r requirements.txt
+docker build -t mnist-service:v1 ./k8s/ml_service
+docker build --build-arg MODEL_TYPE=v2 -t mnist-service:v2 ./k8s/ml_service
+kind load docker-image mnist-service:v1 --name agent-cluster
+kind load docker-image mnist-service:v2 --name agent-cluster
+kubectl apply -f k8s/ml_service/deployment.yaml
 ```
 
-## Echo Service (Test Workload)
+**6. Run the agent:**
+```bash
+uv run python main.py
+```
 
-A simple FastAPI service is included in `echo_service/` to test the agent's deployment capabilities.
+## Example Interactions
 
-### Build and Deploy
+```
+You: Show me all pods running in the cluster
+Agent: Here are the running pods across all namespaces...
 
-1. **Build the Docker image:**
-   ```bash
-   docker build -t echo-service:latest ./echo_service
-   ```
+You: Update the MNIST service to model version v2
+Agent: Updated mnist-service image to mnist-service:v2, rollout complete.
 
-2. **Load image into Kind cluster:**
-   ```bash
-   kind load docker-image echo-service:latest --name agent-cluster
-   ```
+You: What is the P95 inference latency?
+Agent: Current P95 latency from Prometheus: 0.032s
+```
 
-3. **Deploy to Kubernetes:**
-   ```bash
-   kubectl apply -f echo_service/deployment.yaml
-   ```
+## Running Tests
 
-4. **Verify deployment:**
-   ```bash
-   kubectl get pods -l app=echo-service
-   ```
+```bash
+uv run python -m pytest test_agent.py -v -k "TestToolBoundaries or TestMLTools or TestHelpers"  # fast, no LLM
+uv run python -m pytest test_agent.py -v -k "TestFlowRouting"   # LLM integration (needs VPN)
+```
 
-5. **Access the service (Localhost):**
-   The service is exposed via `NodePort` 30080, which is mapped to localhost by the Kind config.
-   
-   ```bash
-   curl -X POST "http://localhost:30080/echo" -d '{"test": "data"}'
-   ```
-6. **Load testing**
+## Running Evaluations
 
-   A load testing script is provided to evaluate the echo service's performance.
+```bash
+uv run python eval/runner.py --arch flow --levels 1 2
+uv run python eval/runner.py --arch simple --levels 1 2
+uv run python eval/runner.py --arch minimal --levels 1
+```
 
-   ```bash
-   python load_test.py --concurrency 5 --requests 20 --output latency_results.json
-   ```
+## Watch Mode (Level 3 Autonomy)
 
-Tell the agent to increase the number of replicas of the echo service and run the load test again to see the performance improvement.
+Monitors cluster health and ML service metrics, remediates issues automatically:
 
-## Repository Structure
+```bash
+uv run python watch.py --interval 30 --dry-run
+uv run python eval/watch_eval.py --all --output eval_watch_results.json
+```
 
-- `main.py`: The entry point for the AI agent. It initializes the CrewAI agent and handles the chat loop.
-- `load_test.py`: An asynchronous script to stress-test deployed services and measure latency.
-- `echo_service/`: Contains the source code for a test workload (FastAPI app) that simulates computational work.
-  - `main.py`: The application code performing matrix multiplication.
-  - `Dockerfile`: Instructions to containerize the service.
-  - `deployment.yaml`: Kubernetes manifests for deploying the service.
-- `kind-config.yaml`: Configuration for the local Kind cluster to map ports to localhost.
-- `pyproject.toml`: Defines project dependencies and python version.
+## References
 
-
-## References and technologies used
-
-- [CrewAI Documentation](https://docs.crewai.com/)
-- [Ollama](https://ollama.ai/)
-- [Kind Documentation](https://kind.sigs.k8s.io/)
-- [FastAPI](https://fastapi.tiangolo.com/)
-- [uvicorn](https://www.uvicorn.org/)
+- [CrewAI](https://docs.crewai.com/) · [Ollama](https://ollama.ai/) · [Kind](https://kind.sigs.k8s.io/) · [FastAPI](https://fastapi.tiangolo.com/)
