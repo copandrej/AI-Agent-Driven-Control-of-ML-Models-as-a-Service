@@ -1,24 +1,21 @@
 FROM python:3.10-slim
 
-ARG MODEL_TYPE=v1
-
 WORKDIR /app
 
+# CPU-only PyTorch + dependencies
 RUN pip install --no-cache-dir \
-    scikit-learn \
-    joblib \
-    numpy \
-    fastapi \
-    uvicorn \
-    prometheus-client
+    torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir \
+    fastapi uvicorn numpy prometheus-client
 
-COPY train.py .
-ENV MODEL_TYPE=${MODEL_TYPE}
-RUN python train.py
+# Pre-download model weights into the image
+COPY download_models.py .
+RUN python download_models.py && rm download_models.py
 
 COPY main.py .
 
-ENV MODEL_VERSION=${MODEL_TYPE}
-ENV MODEL_PATH=/app/model.joblib
+# Model selection at runtime (mobilenet_v2 or resnet50)
+ENV MODEL_NAME=mobilenet_v2
+ENV MODEL_VERSION=v1
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

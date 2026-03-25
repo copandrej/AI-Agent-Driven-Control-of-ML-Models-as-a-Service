@@ -22,6 +22,7 @@ from .agent import (
     PrometheusQueryTool,
     YAMLValidatorTool,
     build_context,
+    clean_response,
     resolve_llm,
     VERBOSE,
 )
@@ -47,7 +48,7 @@ def run_simple(llm, user_input: str, history_context: str = "") -> str:
             "You are a full-stack MLOps agent with access to all tools. "
             "You can read and mutate the cluster, deploy manifests, manage ML model versions, "
             "test inference endpoints, and query Prometheus metrics. "
-            "The MNIST service runs on NodePort 30081 with /health, /predict, /metrics endpoints. "
+            "The ML inference service runs on NodePort 30081 with /health, /predict, /metrics endpoints. "
             "Always verify your actions with kubectl_read after mutations."
         ),
         llm=llm,
@@ -62,7 +63,7 @@ def run_simple(llm, user_input: str, history_context: str = "") -> str:
         agent=agent,
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=VERBOSE)
-    return str(crew.kickoff())
+    return clean_response(str(crew.kickoff()))
 
 
 def main() -> None:

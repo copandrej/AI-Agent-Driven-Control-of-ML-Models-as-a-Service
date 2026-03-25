@@ -1,0 +1,52 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#ffffff', 'primaryBorderColor': '#333333', 'primaryTextColor': '#000000', 'lineColor': '#444444', 'fontFamily': 'Helvetica, Arial, sans-serif', 'fontSize': '14px'}, 'flowchart': {'curve': 'linear', 'padding': 8, 'nodeSpacing': 20, 'rankSpacing': 30, 'htmlLabels': true}}}%%
+
+flowchart TB
+    UI["User Input"] --> HIST["Rolling History<br/>5 turns"] --> ORCH
+
+    subgraph AGENTS["Agents · each runs a ReAct tool-calling loop via LLM"]
+        ORCH["Orchestrator<br/>classify intent"]
+        ORCH -->|deploy| CODE["Coding Agent"]
+        ORCH -->|ops| OPS["Ops Agent"]
+        ORCH -->|monitor| MON["Monitoring Agent"]
+        ORCH -->|ingress| ING["Ingress Agent"]
+        ORCH -->|general| GEN["General Agent"]
+        CODE --> GATE{"YAML Gate"}
+        GATE -->|valid| APPLY["Ops Agent<br/>apply"]
+        GATE -.->|invalid| REJ["Reject"]
+    end
+
+    subgraph TOOLS["Tools · bounded per agent"]
+        T_FR["FileRead"]
+        T_YV["YAMLValidator"]
+        T_KR["kubectl Read"]
+        T_KW["kubectl Write"]
+        T_AM["ApplyManifest"]
+        T_MV["ModelVersion"]
+        T_IC["InferenceClient"]
+        T_PQ["PrometheusQuery"]
+        T_GA["GrafanaAlerts"]
+    end
+
+    CODE --- T_FR & T_YV
+    OPS --- T_KR & T_KW & T_MV & T_IC
+    MON --- T_KR & T_PQ & T_GA & T_IC
+    ING --- T_KR & T_KW
+    GEN --- T_KR
+    APPLY --- T_AM & T_KR
+
+    AGENTS --> LLM["LLM<br/>Ollama / OpenRouter"]
+    AGENTS <--> MEM[("ChromaDB<br/>scoped memory<br/>+ knowledge RAG")]
+
+    T_KR & T_KW & T_AM & T_MV --> K8S["K8s API Server"]
+    T_PQ --> PROM["Prometheus"]
+    T_GA --> GRAF["Grafana"]
+    T_IC --> ML["ML Service :30081"]
+
+    classDef default fill:#fff,stroke:#333,color:#000
+    classDef agent fill:#f0f0f0,stroke:#333,color:#000
+    classDef tool fill:#fff,stroke:#333,color:#000,stroke-dasharray: 5 5
+    classDef ext fill:#e8e8e8,stroke:#333,color:#000
+
+    class ORCH,CODE,OPS,MON,ING,GEN,APPLY agent
+    class T_FR,T_YV,T_KR,T_KW,T_AM,T_MV,T_IC,T_PQ,T_GA tool
+    class K8S,PROM,GRAF,ML,LLM ext

@@ -7,7 +7,7 @@ Agentic system for managing Kubernetes cluster-based ML models through natural l
 - **Flow Backbone**: CrewAI `Flow` with deterministic routing (`deploy`, `ops`, `monitor`, `ingress`, `general`)
 - **5 Specialized Agents**: Orchestrator, Coding, Ops, Monitoring, Ingress — each with bounded tool access
 - **Ablation Baselines**: single-agent with all tools (`simple`), kubectl-only (`minimal`)
-- **ML Service**: MNIST digit classification (sklearn, FastAPI, NodePort 30081)
+- **ML Service**: Pre-trained ImageNet classifiers (torchvision MobileNetV2/ResNet50, FastAPI, NodePort 30081)
 - **Observability**: Prometheus and Grafana integration (when endpoints are configured)
 - **Memory**: Optional scoped ChromaDB memory per agent
 - **Autonomous Mode**: Watch loop for self-healing (Level 3)
@@ -31,7 +31,8 @@ k8s/           — Cluster configuration & service manifests
   kind-config.yaml       — Kind cluster config (NodePort mappings)
   prometheus-values.yaml — Helm values for kube-prometheus-stack
   echo_service/          — Test workload (FastAPI matrix multiply, NodePort 30080)
-  ml_service/            — MNIST inference service (NodePort 30081)
+  ml_service/            — ML inference service (torchvision, NodePort 30081)
+  setup.sh               — All-in-one cluster bootstrap script
 
 main.py        — Entrypoint → src/agent.py
 watch.py       — Entrypoint → src/watch.py
@@ -41,14 +42,14 @@ test_agent.py  — Unit + integration tests
 ## Prerequisites
 
 - Python 3.10+, Docker, kubectl, uv
-- Kind (or any Kubernetes cluster)
+- Kind (or any Kubernetes cluster), Helm
 - Ollama (local LLM) or OpenRouter API key
 
 ## Setup
 
-**1. Create cluster:**
+**1. Bootstrap cluster (builds images, installs Prometheus/Grafana, deploys all services):**
 ```bash
-kind create cluster --name agent-cluster --config k8s/kind-config.yaml
+bash k8s/setup.sh
 ```
 
 **2. Set up LLM** (Ollama example):
@@ -68,16 +69,7 @@ cp .env.example .env
 uv sync
 ```
 
-**5. Deploy MNIST service:**
-```bash
-docker build -t mnist-service:v1 ./k8s/ml_service
-docker build --build-arg MODEL_TYPE=v2 -t mnist-service:v2 ./k8s/ml_service
-kind load docker-image mnist-service:v1 --name agent-cluster
-kind load docker-image mnist-service:v2 --name agent-cluster
-kubectl apply -f k8s/ml_service/deployment.yaml
-```
-
-**6. Run the agent:**
+**5. Run the agent:**
 ```bash
 uv run python main.py
 ```
@@ -88,8 +80,8 @@ uv run python main.py
 You: Show me all pods running in the cluster
 Agent: Here are the running pods across all namespaces...
 
-You: Update the MNIST service to model version v2
-Agent: Updated mnist-service image to mnist-service:v2, rollout complete.
+You: Update the ML service to model version v2
+Agent: Updated ml-service image, switching MODEL_NAME to resnet50, rollout complete.
 
 You: What is the P95 inference latency?
 Agent: Current P95 latency from Prometheus: 0.032s

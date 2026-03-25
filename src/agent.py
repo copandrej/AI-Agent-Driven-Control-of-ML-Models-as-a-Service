@@ -39,6 +39,9 @@ MEMORY_COLLECTION = os.getenv("MEMORY_COLLECTION", "mlops_memories")
 MEMORY_RECALL_LIMIT = int(os.getenv("MEMORY_RECALL_LIMIT", "4"))
 KEEP_MESSAGES = int(os.getenv("KEEP_MESSAGES", "5"))
 KEEP_FULL_OUTPUTS = int(os.getenv("KEEP_FULL_OUTPUTS", "2"))
+KNOWLEDGE_DIR = os.getenv("KNOWLEDGE_DIR", "knowledge")
+KNOWLEDGE_SCOPE = "/knowledge"
+KNOWLEDGE_RECALL_LIMIT = int(os.getenv("KNOWLEDGE_RECALL_LIMIT", "3"))
 
 
 # ── LLM Setup ─────────────────────────────────────────────────────────────
@@ -69,7 +72,8 @@ def resolve_llm() -> LLM:
 
     cls = ReActLLM if FORCE_REACT else LLM
     if provider == "ollama":
-        return cls(model=model, temperature=temperature)
+        return cls(model=model, temperature=temperature, timeout=180,
+                   extra_body={"options": {"num_ctx": 65536}})
     return cls(model=model)
 
 
@@ -86,6 +90,27 @@ def run_cmd(cmd: str, timeout: int = 40) -> str:
         return err or out or "(command failed)"
     except Exception as e:
         return f"Error: {e}"
+
+
+def clean_response(raw: str) -> str:
+    """Strip <think> blocks, ReAct traces, and catch degenerate responses."""
+    # Strip leaked <think> blocks (qwen3 thinking mode residue)
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    raw = re.sub(r"</?think>", "", raw).strip()
+
+    # Strip incomplete ReAct traces leaked when max_iter is hit
+    if re.search(r"\nThought:", raw):
+        result = re.split(r"\n(?:Thought|Action):", raw)[0].strip()
+    elif raw.startswith("Thought:"):
+        fa = re.search(r"Final Answer[:\s]+(.*)", raw, re.DOTALL | re.IGNORECASE)
+        result = fa.group(1).strip() if fa else raw
+    else:
+        result = raw
+
+    # Catch degenerate responses (just backticks, whitespace, etc.)
+    if not result or re.fullmatch(r"[`\s]*", result):
+        return "[Agent produced empty response — the model likely exhausted its output on internal reasoning. Try rephrasing the request.]"
+    return result
 
 
 def clean_yaml(text: str) -> str:
@@ -129,6 +154,53 @@ class ScopedMemory:
             return [d for d in docs if d.strip()]
         except Exception:
             return []
+
+    def ingest_directory(self, directory: str, scope: str) -> int:
+        """Chunk all .md files by ## headings and upsert into ChromaDB.
+        Skips re-ingestion if the directory content hash hasn't changed."""
+        from pathlib import Path
+
+        md_files = sorted(Path(directory).glob("*.md"))
+        if not md_files:
+            return 0
+
+        # Hash all file contents to detect changes
+        content_hash = hashlib.sha256()
+        for f in md_files:
+            content_hash.update(f.read_bytes())
+        digest = content_hash.hexdigest()
+
+        # Check if already ingested (store hash as a sentinel document)
+        sentinel_id = f"_knowledge_hash_{scope}"
+        existing = self.collection.get(ids=[sentinel_id])
+        if existing["documents"] and existing["documents"][0] == digest:
+            return 0
+
+        # Chunk by ## headings, keeping the heading with its content
+        chunks = []
+        for f in md_files:
+            text = f.read_text()
+            sections = re.split(r"(?=^## )", text, flags=re.MULTILINE)
+            for section in sections:
+                section = section.strip()
+                if section and len(section) > 20:
+                    chunks.append(section)
+
+        # Upsert all chunks
+        for i, chunk in enumerate(chunks):
+            chunk_id = hashlib.sha256(f"{scope}|{chunk}".encode()).hexdigest()
+            self.collection.upsert(
+                ids=[chunk_id],
+                documents=[chunk],
+                metadatas=[{"scope": scope, "source": "knowledge"}],
+            )
+
+        # Store sentinel
+        self.collection.upsert(
+            ids=[sentinel_id], documents=[digest],
+            metadatas=[{"scope": scope, "source": "_sentinel"}],
+        )
+        return len(chunks)
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────
@@ -281,7 +353,7 @@ class ModelVersionTool(BaseTool):
     name: str = "model_version_update"
     description: str = (
         "Update the container image tag of a Kubernetes deployment to deploy a new model version. "
-        "Example: deployment='mnist-service', new_tag='v2' changes image to 'mnist-service:v2'. "
+        "Example: deployment='ml-service', new_tag='v2' changes image to 'ml-service:v2'. "
         "Waits for rollout and verifies the update."
     )
     args_schema: type[BaseModel] = _VersionIn
@@ -325,7 +397,7 @@ class InferenceClientTool(BaseTool):
         "Call an ML service endpoint. Use for health checks (GET /health), "
         "predictions (POST /predict with JSON payload), or metrics (GET /metrics). "
         "Examples: url='http://localhost:30081/health' with empty payload for GET, "
-        "url='http://localhost:30081/predict' with payload='{\"pixels\": [...]}' for POST."
+        "url='http://localhost:30081/predict' with payload='{}' for POST (empty JSON uses random input)."
     )
     args_schema: type[BaseModel] = _InferenceIn
 
@@ -373,18 +445,23 @@ class MlOpsFlow(Flow[AppState]):
             recalled = self.memory.recall(scope, self.state.user_input, MEMORY_RECALL_LIMIT)
             if recalled:
                 prompt += "\n\nRelevant memory:\n" + "\n".join(f"- {r}" for r in recalled)
+            knowledge = self.memory.recall(KNOWLEDGE_SCOPE, self.state.user_input, KNOWLEDGE_RECALL_LIMIT)
+            if knowledge:
+                prompt += "\n\nCluster knowledge:\n" + "\n".join(f"- {k}" for k in knowledge)
         task = Task(description=prompt, expected_output=expected, agent=agent)
         crew = Crew(agents=[agent], tasks=[task], verbose=VERBOSE)
-        raw = str(crew.kickoff())
-        # Strip incomplete ReAct traces leaked when max_iter is hit
-        if re.search(r"\nThought:", raw):
-            result = re.split(r"\n(?:Thought|Action):", raw)[0].strip()
-        elif raw.startswith("Thought:"):
-            # Response IS raw ReAct — extract Final Answer if present
-            fa = re.search(r"Final Answer[:\s]+(.*)", raw, re.DOTALL | re.IGNORECASE)
-            result = fa.group(1).strip() if fa else raw
-        else:
-            result = raw
+        try:
+            raw = str(crew.kickoff())
+        except ValueError as e:
+            if "Invalid response from LLM call - None or empty" in str(e):
+                return (
+                    "[LLM returned empty response — likely hit max_iter with thinking mode active. "
+                    "The model exhausted iterations and failed to emit a final answer. "
+                    "Try rephrasing the request or simplifying the task.]"
+                )
+            raise
+
+        result = clean_response(raw)
         if self.memory and result.strip():
             self.memory.remember(scope, f"Q: {self.state.user_input}\nA: {result[:1000]}")
         return result
@@ -398,11 +475,15 @@ class MlOpsFlow(Flow[AppState]):
             goal="Classify user intent into exactly one route",
             backstory=(
                 "You classify requests. Return ONLY one word:\n"
-                "- deploy: create new service from scratch, write new YAML manifest\n"
-                "- ops: update/scale/delete existing resource, switch model version, list/check pods\n"
-                "- monitor: Prometheus query, latency metrics, health check, Grafana alerts\n"
-                "- ingress: ingress rules, traffic routing\n"
-                "- general: greeting, question, conversation"
+                "- deploy: ONLY when user needs a multi-resource YAML manifest written from scratch (e.g. deployment + service + ingress together)\n"
+                "- ops: ANY kubectl operation — create/scale/delete/update deployment, list/describe pods/nodes, "
+                "get logs, apply an existing manifest file, switch model version, call inference endpoints. "
+                "If the user says 'create a deployment with image X' or 'deploy using manifest file Y', that is ops, NOT deploy.\n"
+                "- monitor: Prometheus PromQL query, Grafana alerts, latency percentile analysis\n"
+                "- ingress: ingress rules, traffic routing between services\n"
+                "- general: greeting, question, conversation\n"
+                "Rule of thumb: if it can be done with a single kubectl command, it is ops. "
+                "Only use deploy when complex YAML generation is needed."
             ),
             tools=[KubectlReadTool()],
         )
@@ -490,7 +571,7 @@ class MlOpsFlow(Flow[AppState]):
                 "Use kubectl_write for mutations (create, scale, delete, rollout). "
                 "Use model_version_update to switch ML model versions (e.g. v1→v2) by updating deployment image tags. "
                 "Use inference_client to test ML service endpoints (health checks, predictions, metrics). "
-                "The MNIST service runs on NodePort 30081: health at http://localhost:30081/health, "
+                "The ML inference service runs on NodePort 30081: health at http://localhost:30081/health, "
                 "predictions at http://localhost:30081/predict, metrics at http://localhost:30081/metrics. "
                 "Always verify mutations with kubectl_read after executing them. "
                 "Summarize results in clear natural language."
@@ -518,10 +599,10 @@ class MlOpsFlow(Flow[AppState]):
                 "Fall back to kubectl_read for pod status and resource usage. "
                 "Use inference_client to check ML service health (http://localhost:30081/health) "
                 "or scrape raw Prometheus metrics (http://localhost:30081/metrics). "
-                "Key ML metrics: mnist_requests_total (counter by model_version, status), "
-                "mnist_request_latency_seconds (histogram by model_version). "
-                "PromQL examples: rate(mnist_requests_total[5m]), "
-                "histogram_quantile(0.95, rate(mnist_request_latency_seconds_bucket[5m])). "
+                "Key ML metrics: ml_requests_total (counter by model_version, predicted_class), "
+                "ml_request_latency_seconds (histogram by model_version). "
+                "PromQL examples: rate(ml_requests_total[5m]), "
+                "histogram_quantile(0.95, rate(ml_request_latency_seconds_bucket[5m])). "
                 "Recommend scaling actions when you detect issues."
             ),
             tools=[PrometheusQueryTool(), GrafanaAlertsTool(), KubectlReadTool(), InferenceClientTool()],
@@ -599,6 +680,10 @@ def build_context(history: list[dict]) -> str:
 def main() -> None:
     llm = resolve_llm()
     memory = ScopedMemory(MEMORY_PATH, MEMORY_COLLECTION) if MEMORY_ENABLED else None
+    if memory and os.path.isdir(KNOWLEDGE_DIR):
+        n = memory.ingest_directory(KNOWLEDGE_DIR, KNOWLEDGE_SCOPE)
+        if n:
+            print(f"Ingested {n} knowledge chunks from {KNOWLEDGE_DIR}/")
     history: list[dict] = []
 
     print("MLOps Flow Assistant (type 'exit' to quit)\n")

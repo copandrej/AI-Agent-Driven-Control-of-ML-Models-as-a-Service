@@ -43,6 +43,7 @@ from src.agent import (
     ModelVersionTool,
     PrometheusQueryTool,
     GrafanaAlertsTool,
+    ScopedMemory,
     YAMLValidatorTool,
     build_context,
     clean_yaml,
@@ -187,24 +188,24 @@ class TestMLTools:
     """Verify ML-specific tools work correctly at the unit level."""
 
     def test_inference_client_get_health(self):
-        """InferenceClientTool GET request to MNIST health endpoint."""
+        """InferenceClientTool GET request to ML service health endpoint."""
         tool = InferenceClientTool()
         result = tool._run("http://localhost:30081/health")
-        # If MNIST service is running, expect healthy response; otherwise expect connection error
+        # If ML service is running, expect healthy response; otherwise expect connection error
         assert "healthy" in result.lower() or "error" in result.lower()
 
     def test_inference_client_get_metrics(self):
-        """InferenceClientTool GET request to MNIST metrics endpoint."""
+        """InferenceClientTool GET request to ML service metrics endpoint."""
         tool = InferenceClientTool()
         result = tool._run("http://localhost:30081/metrics")
-        assert "mnist_requests_total" in result or "error" in result.lower()
+        assert "ml_requests_total" in result or "error" in result.lower()
 
     def test_inference_client_post_predict(self):
         """InferenceClientTool POST request with JSON payload."""
         tool = InferenceClientTool()
-        payload = json.dumps({"pixels": [0.0] * 64})
+        payload = json.dumps({})
         result = tool._run("http://localhost:30081/predict", payload=payload)
-        assert "digit" in result.lower() or "prediction" in result.lower() or "error" in result.lower()
+        assert "prediction" in result.lower() or "error" in result.lower()
 
     def test_model_version_tool_nonexistent_deployment(self):
         """ModelVersionTool on nonexistent deployment should report error."""
@@ -305,6 +306,57 @@ class TestHelpers:
         assert entry["user"] == "test question"
         assert len(entry["short"]) == 200
         assert len(entry["full"]) == 800
+
+
+# ── Knowledge RAG Tests (no LLM, fast) ────────────────────────────────────
+
+
+class TestKnowledgeRAG:
+    """Test the knowledge base ingestion and retrieval pipeline."""
+
+    @pytest.fixture(autouse=True)
+    def setup_knowledge(self, tmp_path):
+        """Create a temp knowledge dir and a fresh ChromaDB for each test."""
+        self.knowledge_dir = tmp_path / "knowledge"
+        self.knowledge_dir.mkdir()
+        (self.knowledge_dir / "test.md").write_text(
+            "# Test Doc\n\n"
+            "## GPU Scheduling\n\n"
+            "Use nvidia.com/gpu resource requests for GPU-accelerated inference pods.\n\n"
+            "## Scaling Strategy\n\n"
+            "Use HPA with custom metrics like ml_request_latency_seconds for autoscaling.\n\n"
+            "## Health Probes\n\n"
+            "Configure liveness and readiness probes on /health endpoints.\n"
+        )
+        chroma_path = str(tmp_path / "chroma")
+        self.memory = ScopedMemory(chroma_path, "test_knowledge")
+
+    def test_ingest_chunks_by_heading(self):
+        n = self.memory.ingest_directory(str(self.knowledge_dir), "/knowledge")
+        assert n == 3  # GPU Scheduling, Scaling Strategy, Health Probes
+
+    def test_ingest_skips_when_unchanged(self):
+        self.memory.ingest_directory(str(self.knowledge_dir), "/knowledge")
+        n = self.memory.ingest_directory(str(self.knowledge_dir), "/knowledge")
+        assert n == 0  # hash unchanged, skip
+
+    def test_ingest_reingests_on_change(self):
+        self.memory.ingest_directory(str(self.knowledge_dir), "/knowledge")
+        (self.knowledge_dir / "test.md").write_text(
+            "# Updated\n\n## New Section\n\nNew content here.\n"
+        )
+        n = self.memory.ingest_directory(str(self.knowledge_dir), "/knowledge")
+        assert n > 0  # content changed, re-ingested
+
+    def test_recall_returns_relevant_chunks(self):
+        self.memory.ingest_directory(str(self.knowledge_dir), "/knowledge")
+        results = self.memory.recall("/knowledge", "GPU scheduling for ML models", limit=2)
+        assert len(results) > 0
+        assert any("gpu" in r.lower() or "nvidia" in r.lower() for r in results)
+
+    def test_recall_empty_when_no_knowledge(self):
+        results = self.memory.recall("/knowledge", "GPU scheduling", limit=2)
+        assert results == []
 
 
 # ── Integration Tests: Flow Routing (LLM, slow) ──────────────────────────

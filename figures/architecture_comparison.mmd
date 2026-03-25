@@ -1,0 +1,45 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#ffffff', 'primaryBorderColor': '#333333', 'primaryTextColor': '#000000', 'lineColor': '#444444', 'fontFamily': 'Helvetica, Arial, sans-serif', 'fontSize': '14px'}, 'flowchart': {'curve': 'linear', 'padding': 8, 'nodeSpacing': 20, 'rankSpacing': 30, 'htmlLabels': true}}}%%
+
+flowchart LR
+    subgraph TITLE["Ablation Study"]
+        direction TB
+
+        subgraph FLOW_ARCH["Multi-Agent Flow"]
+            direction TB
+            F_IN["Input"] --> F_O["Orchestrator"]
+            F_O -->|deploy| F_C["Coding<br/>FileRead, YAMLValidator"]
+            F_C --> F_G{"YAML Gate"}
+            F_G --> F_AP["Ops apply<br/>ApplyManifest"]
+            F_O -->|ops| F_OP["Ops<br/>kubectl R/W, ModelVersion<br/>InferenceClient"]
+            F_O -->|monitor| F_M["Monitor<br/>Prometheus, Grafana<br/>InferenceClient"]
+            F_O -->|ingress| F_I["Ingress<br/>kubectl R/W"]
+            F_O -->|general| F_GN["General<br/>kubectl Read"]
+            F_MEM[("ChromaDB<br/>memory + RAG")]
+            F_LLM["LLM<br/>Ollama / OpenRouter"]
+        end
+
+        subgraph SIMPLE["Single-Agent"]
+            direction TB
+            S_IN["Input"] --> S_A["Single MLOps Agent"]
+            S_A --> S_T["All 9 tools<br/>no boundaries"]
+            S_LLM["LLM<br/>Ollama / OpenRouter"]
+        end
+
+        subgraph MINIMAL["Kubectl-Only"]
+            direction TB
+            M_IN["Input"] --> M_A["Single K8s Agent"]
+            M_A --> M_T["Single kubectl tool"]
+            M_LLM["LLM<br/>Ollama / OpenRouter"]
+        end
+    end
+
+    F_OP & F_AP & F_I & F_M --> K8S["K8s Cluster"]
+    S_T --> K8S
+    M_T --> K8S
+
+    classDef default fill:#fff,stroke:#333,color:#000
+    classDef agent fill:#f0f0f0,stroke:#333,color:#000
+    classDef ext fill:#e8e8e8,stroke:#333,color:#000
+
+    class M_A,S_A,F_O,F_C,F_OP,F_M,F_I,F_GN,F_AP agent
+    class K8S,M_LLM,S_LLM,F_LLM,F_MEM ext

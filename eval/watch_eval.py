@@ -28,7 +28,7 @@ from src.agent import run_cmd
 from src.watch import SERVICES, watch_iteration
 
 
-def inject_pod_crash(service_name: str = "mnist-service", namespace: str = "default") -> float:
+def inject_pod_crash(service_name: str = "ml-service", namespace: str = "default") -> float:
     """Kill the first pod of a deployment. Returns injection timestamp."""
     pods = run_cmd(f"kubectl get pods -n {namespace} -l app={service_name} -o name")
     if not pods or "No resources" in pods:
@@ -44,7 +44,7 @@ def inject_pod_crash(service_name: str = "mnist-service", namespace: str = "defa
     return inject_time
 
 
-def inject_bad_image(service_name: str = "mnist-service", namespace: str = "default") -> float:
+def inject_bad_image(service_name: str = "ml-service", namespace: str = "default") -> float:
     """Set a nonexistent image tag to trigger ImagePullBackOff."""
     inject_time = time.time()
     run_cmd(f"kubectl set image deployment/{service_name} {service_name}=nonexistent:broken -n {namespace}")
@@ -52,8 +52,8 @@ def inject_bad_image(service_name: str = "mnist-service", namespace: str = "defa
     return inject_time
 
 
-def restore_good_image(service_name: str = "mnist-service", namespace: str = "default") -> None:
-    run_cmd(f"kubectl set image deployment/{service_name} {service_name}={service_name}:v1 -n {namespace}")
+def restore_good_image(service_name: str = "ml-service", namespace: str = "default") -> None:
+    run_cmd(f"kubectl set image deployment/{service_name} {service_name}={service_name}:latest -n {namespace}")
     run_cmd(f"kubectl rollout status deployment/{service_name} -n {namespace} --timeout=60s")
 
 
@@ -61,10 +61,11 @@ def inject_high_latency(concurrency: int = 20, requests: int = 100) -> float:
     """Generate load to spike latency. Returns injection timestamp."""
     load_test = os.path.join(os.path.dirname(__file__), "load_test.py")
     inject_time = time.time()
+    env = {**os.environ, "LOAD_TEST_URL": "http://localhost:30081/predict"}
     proc = subprocess.Popen(
         [sys.executable, load_test, "--concurrency", str(concurrency),
          "--requests", str(requests), "--output", "/dev/null"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
     )
     print(f"  Injected: load test (concurrency={concurrency}, requests={requests}, pid={proc.pid})")
     return inject_time
@@ -178,7 +179,8 @@ def run_high_latency_scenario(concurrency: int = 20, watch_interval: int = 5) ->
         watch_interval=watch_interval,
         latency_threshold=0.05,
     )
-    run_cmd("kubectl scale deployment mnist-service --replicas=1")
+    run_cmd("kubectl scale deployment ml-service --replicas=1")
+
     return result
 
 

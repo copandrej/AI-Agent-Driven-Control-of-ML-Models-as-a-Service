@@ -73,7 +73,7 @@ tasks:
   - id: L1-05
     level: 1
     category: general_k8s
-    description: Deploy nginx with 2 replicas
+    description: Create nginx deployment with 2 replicas
     prompt: "Create a deployment called eval-nginx with image nginx and 2 replicas"
     expected_intent: ops
     success_criteria:
@@ -178,17 +178,17 @@ tasks:
   - id: L2-01
     level: 2
     category: ml_specific
-    description: Deploy MNIST service from manifest
-    prompt: "Deploy the MNIST inference service using the manifest in k8s/ml_service/deployment.yaml"
+    description: Deploy ML service from manifest
+    prompt: "Deploy the ML inference service using the manifest in k8s/ml_service/deployment.yaml"
     expected_intent: deploy
     success_criteria:
-      response_keywords: ["mnist", "deploy", "applied", "created", "running"]
+      response_keywords: ["ml-service", "deploy", "applied", "created", "running"]
       cluster_check:
-        command: "kubectl get deployment mnist-service -o jsonpath='{.status.availableReplicas}'"
+        command: "kubectl get deployment ml-service -o jsonpath='{.status.availableReplicas}'"
         expected: "1"
     setup_commands:
-      - "kubectl delete deployment mnist-service --ignore-not-found"
-      - "kubectl delete service mnist-service --ignore-not-found"
+      - "kubectl delete deployment ml-service --ignore-not-found"
+      - "kubectl delete service ml-service --ignore-not-found"
       - "sleep 2"
     cleanup_commands: []
     comparable_to: []
@@ -199,8 +199,8 @@ tasks:
     level: 2
     category: ml_specific
     description: Check ML service health endpoint
-    prompt: "Check if the MNIST service is healthy by calling its health endpoint at http://localhost:30081/health"
-    expected_intent: ops
+    prompt: "Check if the ML service is healthy by calling its health endpoint at http://localhost:30081/health"
+    expected_intent: monitor
     success_criteria:
       response_keywords: ["healthy", "health", "status", "model"]
       cluster_check: null
@@ -215,11 +215,11 @@ tasks:
   - id: L2-03
     level: 2
     category: ml_specific
-    description: Send prediction request to MNIST service
-    prompt: "Send a prediction request to the MNIST service at http://localhost:30081/predict with a sample of 64 zero pixels"
+    description: Send prediction request to ML service
+    prompt: "Use the inference client to POST a prediction to http://localhost:30081/predict with an empty JSON payload {}"
     expected_intent: ops
     success_criteria:
-      response_keywords: ["digit", "prediction", "confidence", "predict"]
+      response_keywords: ["prediction", "confidence", "predict", "class"]
       cluster_check: null
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
@@ -233,18 +233,18 @@ tasks:
     level: 2
     category: ml_specific
     description: Update model version v1 to v2
-    prompt: "Update the MNIST service model to version v2"
+    prompt: "Update the ML service model to version v2"
     expected_intent: ops
     success_criteria:
       response_keywords: ["v2", "update", "version", "rollout", "image"]
       cluster_check:
-        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
+        command: "kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
         expected: "v2"
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
       - "sleep 5"
     cleanup_commands:
-      - "kubectl set image deployment/mnist-service mnist-service=mnist-service:v1"
+      - "kubectl set image deployment/ml-service ml-service=ml-service:v1"
       - "sleep 3"
     comparable_to: []
     manual_commands_saved: 3
@@ -254,10 +254,10 @@ tasks:
     level: 2
     category: ml_specific
     description: Query inference metrics via Prometheus
-    prompt: "Query Prometheus for the total number of MNIST inference requests using mnist_requests_total"
+    prompt: "Query Prometheus for the total number of ML inference requests using ml_requests_total"
     expected_intent: monitor
     success_criteria:
-      response_keywords: ["mnist_requests_total", "metric", "request", "prometheus"]
+      response_keywords: ["ml_requests_total", "metric", "request", "prometheus"]
       cluster_check: null
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
@@ -271,7 +271,7 @@ tasks:
     level: 2
     category: ml_specific
     description: Query P95 inference latency
-    prompt: "What is the P95 inference latency of the MNIST service?"
+    prompt: "What is the P95 inference latency of the ML service?"
     expected_intent: monitor
     success_criteria:
       response_keywords: ["latency", "p95", "percentile", "seconds", "histogram"]
@@ -287,19 +287,19 @@ tasks:
   - id: L2-07
     level: 2
     category: ml_specific
-    description: Scale MNIST service for high traffic
-    prompt: "The MNIST service is experiencing high traffic, scale it to 3 replicas"
+    description: Scale ML service for high traffic
+    prompt: "The ML service is experiencing high traffic, scale it to 3 replicas"
     expected_intent: ops
     success_criteria:
-      response_keywords: ["scale", "3", "replica", "mnist"]
+      response_keywords: ["scale", "3", "replica", "ml-service"]
       cluster_check:
-        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.replicas}'"
+        command: "kubectl get deployment ml-service -o jsonpath='{.spec.replicas}'"
         expected: "3"
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
       - "sleep 5"
     cleanup_commands:
-      - "kubectl scale deployment mnist-service --replicas=1"
+      - "kubectl scale deployment ml-service --replicas=1"
     comparable_to: []
     manual_commands_saved: 1
     manual_lines_saved: 0
@@ -308,10 +308,10 @@ tasks:
     level: 2
     category: ml_specific
     description: Check current model version deployed
-    prompt: "What model version is currently deployed for the MNIST service?"
+    prompt: "What model version is currently deployed for the ML service?"
     expected_intent: ops
     success_criteria:
-      response_keywords: ["v1", "v2", "version", "image", "mnist"]
+      response_keywords: ["v1", "v2", "version", "image", "ml-service"]
       cluster_check: null
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
@@ -325,10 +325,10 @@ tasks:
     level: 2
     category: ml_specific
     description: Get raw Prometheus metrics from service
-    prompt: "Scrape the raw metrics from the MNIST service at http://localhost:30081/metrics"
-    expected_intent: ops
+    prompt: "Scrape the raw metrics from the ML service at http://localhost:30081/metrics"
+    expected_intent: monitor
     success_criteria:
-      response_keywords: ["mnist_requests_total", "mnist_request_latency", "metric"]
+      response_keywords: ["ml_requests_total", "ml_request_latency", "metric"]
       cluster_check: null
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
@@ -342,16 +342,16 @@ tasks:
     level: 2
     category: ml_specific
     description: Rollback model version from v2 to v1
-    prompt: "Rollback the MNIST service model from v2 back to v1"
+    prompt: "Rollback the ML service model from v2 back to v1"
     expected_intent: ops
     success_criteria:
       response_keywords: ["v1", "rollback", "version", "update", "image"]
       cluster_check:
-        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
+        command: "kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
         expected: "v1"
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "kubectl set image deployment/mnist-service mnist-service=mnist-service:v2"
+      - "kubectl set image deployment/ml-service ml-service=ml-service:v2"
       - "sleep 5"
     cleanup_commands: []
     comparable_to: []
@@ -382,18 +382,18 @@ tasks:
     level: 3
     category: ml_specific
     description: Detect and fix high latency by scaling
-    prompt: "The MNIST service latency is very high and users are complaining. Investigate the metrics and take action to fix it."
+    prompt: "The ML service latency is very high and users are complaining. Investigate the metrics and take action to fix it."
     expected_intent: monitor
     success_criteria:
       response_keywords: ["latency", "scale", "replica", "performance", "action"]
       cluster_check:
-        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.replicas}'"
+        command: "kubectl get deployment ml-service -o jsonpath='{.spec.replicas}'"
         expected: "2"
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
       - "sleep 5"
     cleanup_commands:
-      - "kubectl scale deployment mnist-service --replicas=1"
+      - "kubectl scale deployment ml-service --replicas=1"
     comparable_to: [AIOpsLab]
     manual_commands_saved: 4
     manual_lines_saved: 0
@@ -402,10 +402,10 @@ tasks:
     level: 3
     category: ml_specific
     description: Detect and restart crashed ML service pod
-    prompt: "The MNIST service pod seems to have crashed. Check it and restart it if needed."
+    prompt: "The ML service pod seems to have crashed. Check it and restart it if needed."
     expected_intent: ops
     success_criteria:
-      response_keywords: ["restart", "delete", "rollout", "pod", "mnist"]
+      response_keywords: ["restart", "delete", "rollout", "pod", "ml-service"]
       cluster_check: null
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
@@ -438,16 +438,16 @@ tasks:
     level: 3
     category: ml_specific
     description: Deploy, test health, update version, verify
-    prompt: "Deploy the MNIST service, verify it is healthy, then update it to model version v2 and confirm the new version is working"
+    prompt: "Deploy the ML service, verify it is healthy, then update it to model version v2 and confirm the new version is working"
     expected_intent: deploy
     success_criteria:
-      response_keywords: ["mnist", "healthy", "v2", "deploy", "version"]
+      response_keywords: ["ml-service", "healthy", "v2", "deploy", "version"]
       cluster_check:
-        command: "kubectl get deployment mnist-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
+        command: "kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
         expected: "v2"
     setup_commands:
-      - "kubectl delete deployment mnist-service --ignore-not-found"
-      - "kubectl delete service mnist-service --ignore-not-found"
+      - "kubectl delete deployment ml-service --ignore-not-found"
+      - "kubectl delete service ml-service --ignore-not-found"
       - "sleep 2"
     cleanup_commands: []
     comparable_to: []

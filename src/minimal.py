@@ -21,6 +21,7 @@ from .agent import (
     KubectlReadTool,
     KubectlWriteTool,
     build_context,
+    clean_response,
     resolve_llm,
     VERBOSE,
 )
@@ -39,7 +40,7 @@ def run_minimal(llm, user_input: str, history_context: str = "") -> str:
         llm=llm,
         tools=[KubectlReadTool(), KubectlWriteTool()],
         verbose=VERBOSE,
-        max_iter=10,
+        max_iter=15,
     )
     prompt = history_context + user_input if history_context else user_input
     task = Task(
@@ -48,7 +49,7 @@ def run_minimal(llm, user_input: str, history_context: str = "") -> str:
         agent=agent,
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=VERBOSE)
-    return str(crew.kickoff())
+    return clean_response(str(crew.kickoff()))
 
 
 def main() -> None:

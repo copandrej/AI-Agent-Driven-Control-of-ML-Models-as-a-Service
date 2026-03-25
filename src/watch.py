@@ -32,7 +32,7 @@ DEFAULT_MAX_REPLICAS = 5
 DEFAULT_LOG_FILE = "watch_log.jsonl"
 
 SERVICES = [
-    {"name": "mnist-service", "namespace": "default", "health_url": "http://localhost:30081/health", "metrics_url": "http://localhost:30081/metrics"},
+    {"name": "ml-service", "namespace": "default", "health_url": "http://localhost:30081/health", "metrics_url": "http://localhost:30081/metrics"},
 ]
 
 
@@ -64,7 +64,7 @@ def check_pod_health(namespace: str = "default") -> list[dict]:
         if len(parts) < 3:
             continue
         name, ready, status = parts[0], parts[1], parts[2]
-        if status in ("CrashLoopBackOff", "Error", "ImagePullBackOff", "ErrImagePull"):
+        if status in ("CrashLoopBackOff", "Error", "ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
             issues.append({"pod": name, "status": status, "namespace": namespace})
         elif status == "Running" and "/" in ready:
             current, total = ready.split("/")
@@ -85,7 +85,7 @@ def check_service_health(url: str) -> dict:
         return {"healthy": False, "response": str(e), "latency_ms": round(latency * 1000, 1)}
 
 
-def parse_p95_from_metrics(metrics_text: str, metric_name: str = "mnist_request_latency_seconds") -> float | None:
+def parse_p95_from_metrics(metrics_text: str, metric_name: str = "ml_request_latency_seconds") -> float | None:
     """Estimate P95 from Prometheus histogram buckets scraped from /metrics."""
     buckets = []
     for line in metrics_text.splitlines():
@@ -107,13 +107,32 @@ def parse_p95_from_metrics(metrics_text: str, metric_name: str = "mnist_request_
 
 
 def check_latency(metrics_url: str, threshold: float) -> dict:
+    """Check latency via direct HTTP timing against the predict endpoint.
+    Falls back to Prometheus histogram P95 if predict endpoint is unavailable.
+    HTTP round-trip is the right signal for scaling — internal Prometheus histograms
+    measure only inference time (sub-ms for sklearn) and miss network/queue effects."""
+    predict_url = metrics_url.replace("/metrics", "/predict")
+    try:
+        import json as _json
+        payload = _json.dumps({}).encode()
+        req = Request(predict_url, data=payload, headers={"Content-Type": "application/json"})
+        t0 = time.time()
+        with urlopen(req, timeout=10):
+            pass
+        latency = time.time() - t0
+        return {"exceeded": latency > threshold, "p95": round(latency, 4), "threshold": threshold,
+                "note": "http_roundtrip"}
+    except Exception:
+        pass
+    # Fallback: Prometheus histogram
     try:
         with urlopen(Request(metrics_url), timeout=10) as r:
             text = r.read().decode()
         p95 = parse_p95_from_metrics(text)
         if p95 is None:
             return {"exceeded": False, "p95": None, "threshold": threshold, "note": "no data"}
-        return {"exceeded": p95 > threshold, "p95": round(p95, 4), "threshold": threshold}
+        return {"exceeded": p95 > threshold, "p95": round(p95, 4), "threshold": threshold,
+                "note": "prometheus_p95"}
     except Exception as e:
         return {"exceeded": False, "p95": None, "threshold": threshold, "note": str(e)}
 

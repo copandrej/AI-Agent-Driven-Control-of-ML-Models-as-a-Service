@@ -5,12 +5,18 @@ import aiohttp
 import time
 import json
 import argparse
+import os
 import statistics
 
-URL = "http://localhost:30080/echo"
+ML_SERVICE_URL = "http://localhost:30081/predict"
+ECHO_URL = "http://localhost:30080/echo"
+URL = os.getenv("LOAD_TEST_URL", ECHO_URL)
 
 async def send_request(session, req_id):
-    payload = {"test": "data", "id": req_id}
+    if "predict" in URL:
+        payload = {}
+    else:
+        payload = {"test": "data", "id": req_id}
     start_time = time.time()
     try:
         async with session.post(URL, json=payload) as response:

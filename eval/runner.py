@@ -57,7 +57,8 @@ def check_cluster_state(cluster_check: dict | None) -> dict | None:
     cmd = cluster_check["command"]
     expected = cluster_check["expected"]
     actual = run_cmd(cmd, timeout=15)
-    passed = expected.lower() in actual.lower() if expected else actual.strip() == ""
+    actual_normalized = "" if actual.strip() in ("(no output)", "") else actual.strip()
+    passed = expected.lower() in actual.lower() if expected else actual_normalized == ""
     return {"passed": passed, "expected": expected, "actual": actual.strip()}
 
 
@@ -101,12 +102,24 @@ def run_minimal_task(llm, prompt: str, history_context: str = "") -> dict:
     return {"response": response, "intent": intent, "elapsed": round(elapsed, 2)}
 
 
+def cleanup_eval_resources() -> None:
+    """Remove any leftover eval-* resources from prior runs."""
+    for kind in ("deployment", "service"):
+        out = run_cmd(f"kubectl get {kind} -o name --no-headers", timeout=10)
+        for line in out.splitlines():
+            name = line.split("/")[-1]
+            if name.startswith("eval-"):
+                run_cmd(f"kubectl delete {kind} {name} --ignore-not-found --wait=false", timeout=15)
+
+
 def run_single_task(llm, task: dict, architecture: str = "flow") -> dict:
     task_id = task["id"]
     print(f"\n{'='*60}")
     print(f"Task {task_id}: {task['description']} [{architecture}]")
     print(f"{'='*60}")
 
+    # Clean up before task to ensure clean state from prior runs
+    cleanup_task(task)
     setup_preconditions(task)
 
     runners = {"flow": run_flow_task, "simple": run_simple_task, "minimal": run_minimal_task}
@@ -119,18 +132,22 @@ def run_single_task(llm, task: dict, architecture: str = "flow") -> dict:
     intent_correct = (
         result["intent"] == task["expected_intent"]
         if architecture == "flow"
-        else True  # simple/minimal have no intent routing
+        else None  # simple/minimal have no intent routing
     )
 
+    # Intent classification is tracked for analysis but does NOT gate success.
+    # A task passes if the response is correct and cluster state matches,
+    # regardless of which agent handled it.
     success = (
         kw_check["passed"]
         and (cl_check is None or cl_check["passed"])
-        and intent_correct
         and "Error:" not in result["response"][:20]
+        and "[LLM returned empty response" not in result["response"]
     )
 
     status = "PASS" if success else "FAIL"
-    print(f"  Intent: {result['intent']} (expected: {task['expected_intent']}) {'OK' if intent_correct else 'MISS'}")
+    intent_label = "N/A" if intent_correct is None else ("OK" if intent_correct else "MISS")
+    print(f"  Intent: {result['intent']} (expected: {task['expected_intent']}) {intent_label}")
     print(f"  Keywords: {kw_check['matched']} {'OK' if kw_check['passed'] else 'MISS'}")
     if cl_check:
         print(f"  Cluster: {cl_check['actual'][:80]} {'OK' if cl_check['passed'] else 'MISS'}")
@@ -167,7 +184,7 @@ def compute_summary(results: list[dict]) -> dict:
         return {"total_tasks": 0}
 
     successes = sum(1 for r in results if r["success"])
-    intent_correct = sum(1 for r in results if r["intent_correct"])
+    intent_correct = sum(1 for r in results if r["intent_correct"] is True)
 
     def level_stats(level: int) -> dict:
         subset = [r for r in results if r["level"] == level]
@@ -228,6 +245,10 @@ def run_evaluation(
     print(f"LLM: {llm.model}")
     print(f"{'='*60}\n")
 
+    # Global cleanup of leftover eval resources before starting
+    print("Cleaning up leftover eval resources...")
+    cleanup_eval_resources()
+
     start_time = time.time()
     results = []
     for task in tasks:
@@ -262,7 +283,7 @@ def run_evaluation(
     print(f"Architecture: {architecture}")
     print(f"LLM: {llm.model}")
     print(f"Total: {summary['total_tasks']} tasks, {summary['passed']} passed ({summary['success_rate']}%)")
-    print(f"Intent accuracy: {summary['intent_accuracy']}%")
+    print(f"Intent accuracy (info only): {summary['intent_accuracy']}%")
     print(f"Avg elapsed: {summary['avg_elapsed']}s per task")
     for lvl in (1, 2, 3):
         ls = summary["by_level"].get(lvl, {})

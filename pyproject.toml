@@ -5,8 +5,8 @@ description = "AI-powered agent system for managing Kubernetes clusters"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "crewai>=1.8.0",
-    "crewai-tools>=0.40.0",
+    "crewai>=1.11.1",
+    "crewai-tools>=1.11.1",
     "python-dotenv>=1.0.0",
     "litellm>=1.0.0",
     "aiohttp>=3.13.2",
