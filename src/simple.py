@@ -1,5 +1,5 @@
 """
-MLOps Simple Agent (Ablation Baseline)
+Simple Agent (Ablation Baseline)
 =======================================
 Single agent with all tools, no intent routing, no tool boundaries.
 Used for benchmark comparison against the Flow-first architecture.
@@ -12,7 +12,8 @@ os.environ.setdefault("LITELLM_LOG", os.getenv("LITELLM_LOG", "CRITICAL"))
 from crewai import Agent, Crew, Task
 from crewai_tools import FileReadTool
 
-from .agent import (
+from .agent import build_context, clean_response, resolve_llm, VERBOSE
+from .tools import (
     ApplyManifestTool,
     GrafanaAlertsTool,
     InferenceClientTool,
@@ -21,10 +22,6 @@ from .agent import (
     ModelVersionTool,
     PrometheusQueryTool,
     YAMLValidatorTool,
-    build_context,
-    clean_response,
-    resolve_llm,
-    VERBOSE,
 )
 
 ALL_TOOLS = [
@@ -43,23 +40,30 @@ ALL_TOOLS = [
 def run_simple(llm, user_input: str, history_context: str = "") -> str:
     agent = Agent(
         role="MLOps Agent",
-        goal="Handle any Kubernetes and ML operations request",
+        goal="Handle any Kubernetes and ML operations request by calling tools — never reason about cluster state without a tool call",
         backstory=(
-            "You are a full-stack MLOps agent with access to all tools. "
-            "You can read and mutate the cluster, deploy manifests, manage ML model versions, "
-            "test inference endpoints, and query Prometheus metrics. "
-            "The ML inference service runs on NodePort 30081 with /health, /predict, /metrics endpoints. "
-            "Always verify your actions with kubectl_read after mutations."
+            "You are a full-stack MLOps agent. ALWAYS use tools to get live data — never guess or assume cluster state.\n"
+            "Tool usage rules:\n"
+            "- kubectl_read: for ALL read operations (get, describe, logs, top). Call first before any mutation.\n"
+            "- kubectl_write: for mutations (scale, delete, rollout). Always verify with kubectl_read after.\n"
+            "- model_version_update: REQUIRED for model version switches. Do not use kubectl_write for this.\n"
+            "- inference_client: REQUIRED for any ML service call. "
+            "NodePort 30081: GET /health, POST /predict (payload '{}' uses random input), GET /metrics.\n"
+            "- prometheus_query: REQUIRED for PromQL/Prometheus metric queries.\n"
+            "- grafana_alerts: REQUIRED for Grafana alert state.\n"
+            "- apply_manifest: REQUIRED for applying YAML manifests to the cluster.\n"
+            "- yaml_validator: REQUIRED before applying any generated YAML.\n"
+            "Never skip a tool call when the task requires live data or cluster mutation."
         ),
         llm=llm,
         tools=ALL_TOOLS,
         verbose=VERBOSE,
-        max_iter=15,
+        max_iter=25,
     )
     prompt = history_context + user_input if history_context else user_input
     task = Task(
         description=prompt,
-        expected_output="Clear, actionable response with verification",
+        expected_output="Clear, actionable response with verification from tool output",
         agent=agent,
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=VERBOSE)

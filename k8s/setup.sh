@@ -36,9 +36,15 @@ docker build -t echo-service:latest "$SCRIPT_DIR/echo_service"
 echo "Building ml-service:latest..."
 docker build -t ml-service:latest "$SCRIPT_DIR/ml_service"
 
+echo "Tagging ml-service versioned images..."
+docker tag ml-service:latest ml-service:v1
+docker tag ml-service:latest ml-service:v2
+
 echo "Loading images into Kind..."
 kind load docker-image echo-service:latest --name "$CLUSTER_NAME"
 kind load docker-image ml-service:latest --name "$CLUSTER_NAME"
+kind load docker-image ml-service:v1 --name "$CLUSTER_NAME"
+kind load docker-image ml-service:v2 --name "$CLUSTER_NAME"
 
 # ── Prometheus + Grafana ─────────────────────────────────────────────────
 

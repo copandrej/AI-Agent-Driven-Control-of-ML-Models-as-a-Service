@@ -1,31 +1,37 @@
 """
-MLOps Multi-Agent Flow Assistant
-=================================
+Kubernetes Multi-Agent Flow Assistant
+======================================
 Flow-first architecture with deterministic routing and specialized agents.
 
 Routes: deploy | monitor | ingress | ops | general
 Agents: Orchestrator, Coding, Ops, Monitoring, Ingress — each with bounded tools.
 """
 
-import hashlib
 import os
 import re
-import subprocess
-import tempfile
-from datetime import datetime, timezone
-from urllib.parse import quote_plus
-from urllib.request import Request, urlopen
 
 os.environ.setdefault("LITELLM_LOG", os.getenv("LITELLM_LOG", "CRITICAL"))
 
-import yaml
 from crewai import Agent, Crew, Task
 from crewai.flow.flow import Flow, listen, router, start
 from crewai.llm import LLM
-from crewai.tools import BaseTool
 from crewai_tools import FileReadTool
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+from .rag import ScopedMemory
+from .tools import (
+    ApplyManifestTool,
+    GrafanaAlertsTool,
+    InferenceClientTool,
+    KubectlReadTool,
+    KubectlWriteTool,
+    ModelVersionTool,
+    PrometheusQueryTool,
+    YAMLValidatorTool,
+    clean_yaml,
+    run_cmd,
+)
 
 load_dotenv()
 
@@ -64,32 +70,26 @@ def resolve_llm() -> LLM:
             "OLLAMA_BASE_URL", "http://localhost:11434"
         )
         model = f"ollama/{os.getenv('OLLAMA_MODEL', 'qwen3:8b')}"
+    elif provider == "openai_compat":
+        base_url = os.getenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8001/v1")
+        os.environ["OPENAI_API_BASE"] = base_url
+        os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_COMPAT_API_KEY", "dummy")
+        model = f"openai/{os.getenv('OPENAI_COMPAT_MODEL', 'default')}"
+        temperature = float(os.getenv("OPENAI_COMPAT_TEMPERATURE", os.getenv("OLLAMA_TEMPERATURE", "0.4")))
     elif provider == "openrouter":
         os.environ["OPENROUTER_API_KEY"] = os.getenv("OPENROUTER_API_KEY", "")
         model = f"openrouter/{os.getenv('OPENROUTER_MODEL', 'z-ai/glm-4.5-air:free')}"
     else:
-        raise RuntimeError("Set LLM_PROVIDER in .env (ollama or openrouter)")
+        raise RuntimeError("Set LLM_PROVIDER in .env (ollama, openai_compat, or openrouter)")
 
     cls = ReActLLM if FORCE_REACT else LLM
-    if provider == "ollama":
+    if provider in ("ollama", "openai_compat"):
         return cls(model=model, temperature=temperature, timeout=180,
                    extra_body={"options": {"num_ctx": 65536}})
     return cls(model=model)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
-
-
-def run_cmd(cmd: str, timeout: int = 40) -> str:
-    try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        out = r.stdout.strip()
-        err = r.stderr.strip()
-        if r.returncode == 0:
-            return out or "(no output)"
-        return err or out or "(command failed)"
-    except Exception as e:
-        return f"Error: {e}"
 
 
 def clean_response(raw: str) -> str:
@@ -113,305 +113,20 @@ def clean_response(raw: str) -> str:
     return result
 
 
-def clean_yaml(text: str) -> str:
-    t = text.strip()
-    for prefix in ("```yaml", "```"):
-        if t.startswith(prefix):
-            t = t[len(prefix):]
-            break
-    if t.endswith("```"):
-        t = t[:-3]
-    return t.strip()
-
-
-# ── Scoped Memory ─────────────────────────────────────────────────────────
-
-
-class ScopedMemory:
-    """Simple ChromaDB wrapper with scope-filtered recall."""
-
-    def __init__(self, path: str, collection: str):
-        import chromadb
-        self.client = chromadb.PersistentClient(path=path)
-        self.collection = self.client.get_or_create_collection(collection)
-
-    def remember(self, scope: str, content: str) -> None:
-        if not content.strip():
-            return
-        digest = hashlib.sha256(f"{scope}|{content}".encode()).hexdigest()
-        self.collection.upsert(
-            ids=[digest],
-            documents=[content],
-            metadatas=[{"scope": scope, "ts": datetime.now(timezone.utc).isoformat()}],
-        )
-
-    def recall(self, scope: str, query: str, limit: int = 4) -> list[str]:
-        try:
-            result = self.collection.query(
-                query_texts=[query], n_results=limit, where={"scope": scope}
-            )
-            docs = result.get("documents", [[]])[0]
-            return [d for d in docs if d.strip()]
-        except Exception:
-            return []
-
-    def ingest_directory(self, directory: str, scope: str) -> int:
-        """Chunk all .md files by ## headings and upsert into ChromaDB.
-        Skips re-ingestion if the directory content hash hasn't changed."""
-        from pathlib import Path
-
-        md_files = sorted(Path(directory).glob("*.md"))
-        if not md_files:
-            return 0
-
-        # Hash all file contents to detect changes
-        content_hash = hashlib.sha256()
-        for f in md_files:
-            content_hash.update(f.read_bytes())
-        digest = content_hash.hexdigest()
-
-        # Check if already ingested (store hash as a sentinel document)
-        sentinel_id = f"_knowledge_hash_{scope}"
-        existing = self.collection.get(ids=[sentinel_id])
-        if existing["documents"] and existing["documents"][0] == digest:
-            return 0
-
-        # Chunk by ## headings, keeping the heading with its content
-        chunks = []
-        for f in md_files:
-            text = f.read_text()
-            sections = re.split(r"(?=^## )", text, flags=re.MULTILINE)
-            for section in sections:
-                section = section.strip()
-                if section and len(section) > 20:
-                    chunks.append(section)
-
-        # Upsert all chunks
-        for i, chunk in enumerate(chunks):
-            chunk_id = hashlib.sha256(f"{scope}|{chunk}".encode()).hexdigest()
-            self.collection.upsert(
-                ids=[chunk_id],
-                documents=[chunk],
-                metadatas=[{"scope": scope, "source": "knowledge"}],
-            )
-
-        # Store sentinel
-        self.collection.upsert(
-            ids=[sentinel_id], documents=[digest],
-            metadatas=[{"scope": scope, "source": "_sentinel"}],
-        )
-        return len(chunks)
-
-
-# ── Tools ─────────────────────────────────────────────────────────────────
-
-
-class _CmdIn(BaseModel):
-    command: str = Field(..., description="kubectl command without 'kubectl' prefix")
-
-
-class KubectlReadTool(BaseTool):
-    """Read-only kubectl: get, describe, logs, top."""
-    name: str = "kubectl_read"
-    description: str = (
-        "Read-only kubectl access. Allowed verbs: get, describe, logs, top. "
-        "Use -A for cluster-wide listing. Examples: 'get pods -A', 'describe pod X -n Y', 'top nodes'."
+def build_context(history: list[dict]) -> str:
+    if not history:
+        return ""
+    recent = history[-KEEP_MESSAGES:]
+    parts = []
+    for i, h in enumerate(recent):
+        is_recent = i >= len(recent) - KEEP_FULL_OUTPUTS
+        resp = h["full"] if is_recent else h["short"]
+        parts.append(f"User: {h['user']}\nAssistant: {resp}")
+    return (
+        "=== CONVERSATION HISTORY ===\n"
+        + "\n".join(parts)
+        + "\n=== END HISTORY ===\n\n"
     )
-    args_schema: type[BaseModel] = _CmdIn
-
-    def _run(self, command: str) -> str:
-        cmd = command.strip()
-        if not cmd.startswith(("get ", "describe ", "logs ", "top ")):
-            return "Denied: read-only tool — only get/describe/logs/top allowed."
-        return run_cmd(f"kubectl {cmd}")
-
-
-class KubectlWriteTool(BaseTool):
-    """Mutation kubectl: create, scale, delete, rollout, expose, label, annotate, patch."""
-    name: str = "kubectl_write"
-    description: str = (
-        "Mutating kubectl commands. Allowed: create, scale, delete, rollout, expose, "
-        "label, annotate, patch. Always verify with kubectl_read after mutations. "
-        "Examples: 'create deployment nginx --image=nginx', 'scale deployment X --replicas=3'."
-    )
-    args_schema: type[BaseModel] = _CmdIn
-
-    def _run(self, command: str) -> str:
-        cmd = command.strip()
-        allowed = ("create ", "scale ", "delete ", "rollout ", "expose ", "label ", "annotate ", "patch ")
-        if not cmd.startswith(allowed):
-            return "Denied: allowed verbs are create/scale/delete/rollout/expose/label/annotate/patch."
-        return run_cmd(f"kubectl {cmd}")
-
-
-class _ManifestIn(BaseModel):
-    manifest_yaml: str = Field(..., description="YAML manifest text")
-
-
-class ApplyManifestTool(BaseTool):
-    """Apply YAML manifest to the cluster."""
-    name: str = "apply_manifest"
-    description: str = (
-        "Apply YAML manifest text to the Kubernetes cluster. "
-        "Strips markdown fences automatically. Verifies pods after apply."
-    )
-    args_schema: type[BaseModel] = _ManifestIn
-
-    def _run(self, manifest_yaml: str) -> str:
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-                f.write(clean_yaml(manifest_yaml))
-                path = f.name
-            out = run_cmd(f"kubectl apply -f {path}")
-            verify = run_cmd("kubectl get pods -A -o wide")
-            return f"Apply result:\n{out}\n\nCluster pods:\n{verify}"
-        except Exception as e:
-            return f"Error: {e}"
-
-
-class _YamlIn(BaseModel):
-    yaml_text: str = Field(..., description="YAML text to validate")
-
-
-class YAMLValidatorTool(BaseTool):
-    """Validate Kubernetes YAML structure."""
-    name: str = "yaml_validator"
-    description: str = "Validate Kubernetes YAML — returns VALID or INVALID with details."
-    args_schema: type[BaseModel] = _YamlIn
-
-    def _run(self, yaml_text: str) -> str:
-        try:
-            docs = [d for d in yaml.safe_load_all(clean_yaml(yaml_text)) if d]
-            if not docs:
-                return "INVALID: empty YAML"
-            for d in docs:
-                if not isinstance(d, dict):
-                    return "INVALID: not a mapping"
-                for k in ("apiVersion", "kind", "metadata"):
-                    if k not in d:
-                        return f"INVALID: missing {k}"
-            return f"VALID: {', '.join(d['kind'] for d in docs)}"
-        except Exception as e:
-            return f"INVALID: {e}"
-
-
-class _PromIn(BaseModel):
-    query: str = Field(..., description="PromQL query")
-
-
-class PrometheusQueryTool(BaseTool):
-    """Run PromQL query against Prometheus."""
-    name: str = "prometheus_query"
-    description: str = "Run a PromQL query against the Prometheus HTTP API."
-    args_schema: type[BaseModel] = _PromIn
-
-    def _run(self, query: str) -> str:
-        base = os.getenv("PROMETHEUS_URL", "").strip()
-        if not base:
-            return "PROMETHEUS_URL not configured"
-        try:
-            with urlopen(f"{base.rstrip('/')}/api/v1/query?query={quote_plus(query)}", timeout=20) as r:
-                return r.read().decode()[:3000]
-        except Exception as e:
-            return f"Error: {e}"
-
-
-class _AlertIn(BaseModel):
-    state: str = Field(default="active", description="Alert state filter")
-
-
-class GrafanaAlertsTool(BaseTool):
-    """Fetch Grafana Alertmanager alerts."""
-    name: str = "grafana_alerts"
-    description: str = "Fetch alerts from Grafana Alertmanager."
-    args_schema: type[BaseModel] = _AlertIn
-
-    def _run(self, state: str = "active") -> str:
-        base = os.getenv("GRAFANA_URL", "").strip()
-        token = os.getenv("GRAFANA_TOKEN", "").strip()
-        if not base:
-            return "GRAFANA_URL not configured"
-        url = f"{base.rstrip('/')}/api/alertmanager/grafana/api/v2/alerts?active={str(state == 'active').lower()}"
-        headers = {"Accept": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        try:
-            with urlopen(Request(url, headers=headers), timeout=20) as r:
-                return r.read().decode()[:3000]
-        except Exception as e:
-            return f"Error: {e}"
-
-
-class _VersionIn(BaseModel):
-    deployment: str = Field(..., description="Deployment name")
-    new_tag: str = Field(..., description="New image tag (e.g. 'v2')")
-    namespace: str = Field(default="default", description="Namespace")
-
-
-class ModelVersionTool(BaseTool):
-    """Update the image tag of a deployment to switch model versions."""
-    name: str = "model_version_update"
-    description: str = (
-        "Update the container image tag of a Kubernetes deployment to deploy a new model version. "
-        "Example: deployment='ml-service', new_tag='v2' changes image to 'ml-service:v2'. "
-        "Waits for rollout and verifies the update."
-    )
-    args_schema: type[BaseModel] = _VersionIn
-
-    def _run(self, deployment: str, new_tag: str, namespace: str = "default") -> str:
-        current = run_cmd(
-            f"kubectl get deployment {deployment} -n {namespace} "
-            f"-o jsonpath='{{.spec.template.spec.containers[0].image}}'"
-        )
-        base_image = current.rsplit(":", 1)[0] if ":" in current else current
-        new_image = f"{base_image}:{new_tag}"
-        result = run_cmd(
-            f"kubectl set image deployment/{deployment} "
-            f"{deployment}={new_image} -n {namespace}"
-        )
-        rollout = run_cmd(
-            f"kubectl rollout status deployment/{deployment} -n {namespace} --timeout=60s"
-        )
-        verify = run_cmd(
-            f"kubectl get deployment {deployment} -n {namespace} "
-            f"-o jsonpath='{{.spec.template.spec.containers[0].image}}'"
-        )
-        return (
-            f"Previous image: {current}\n"
-            f"Updated to: {new_image}\n"
-            f"Set image: {result}\n"
-            f"Rollout: {rollout}\n"
-            f"Verified image: {verify}"
-        )
-
-
-class _InferenceIn(BaseModel):
-    url: str = Field(..., description="Full URL to the inference endpoint (e.g. http://localhost:30081/predict)")
-    payload: str = Field(default="", description="JSON payload string to POST. Leave empty for GET requests.")
-
-
-class InferenceClientTool(BaseTool):
-    """Call an ML inference service endpoint to test it."""
-    name: str = "inference_client"
-    description: str = (
-        "Call an ML service endpoint. Use for health checks (GET /health), "
-        "predictions (POST /predict with JSON payload), or metrics (GET /metrics). "
-        "Examples: url='http://localhost:30081/health' with empty payload for GET, "
-        "url='http://localhost:30081/predict' with payload='{}' for POST (empty JSON uses random input)."
-    )
-    args_schema: type[BaseModel] = _InferenceIn
-
-    def _run(self, url: str, payload: str = "") -> str:
-        try:
-            if payload.strip():
-                data = payload.encode("utf-8")
-                req = Request(url, data=data, headers={"Content-Type": "application/json"})
-            else:
-                req = Request(url)
-            with urlopen(req, timeout=20) as r:
-                return r.read().decode()[:3000]
-        except Exception as e:
-            return f"Error: {e}"
 
 
 # ── Flow State & Routing ──────────────────────────────────────────────────
@@ -436,7 +151,7 @@ class MlOpsFlow(Flow[AppState]):
     def _agent(self, role: str, goal: str, backstory: str, tools: list) -> Agent:
         return Agent(
             role=role, goal=goal, backstory=backstory,
-            llm=self.llm, tools=tools, verbose=VERBOSE, max_iter=15,
+            llm=self.llm, tools=tools, verbose=VERBOSE, max_iter=25,
         )
 
     def _run_crew(self, agent: Agent, description: str, expected: str, scope: str) -> str:
@@ -483,7 +198,8 @@ class MlOpsFlow(Flow[AppState]):
                 "- ingress: ingress rules, traffic routing between services\n"
                 "- general: greeting, question, conversation\n"
                 "Rule of thumb: if it can be done with a single kubectl command, it is ops. "
-                "Only use deploy when complex YAML generation is needed."
+                "Only use deploy when complex YAML generation is needed.\n"
+                "IMPORTANT: Use kubectl_read to check current cluster state if you need context before classifying."
             ),
             tools=[KubectlReadTool()],
         )
@@ -510,8 +226,9 @@ class MlOpsFlow(Flow[AppState]):
             goal="Generate valid Kubernetes YAML manifests",
             backstory=(
                 "You write Kubernetes YAML for deployments, services, and ingress. "
+                "Use file_read to read existing manifests as templates before writing new ones. "
                 "Output ONLY valid YAML separated by ---. No markdown fences, no commentary. "
-                "Always validate your output with yaml_validator before finishing."
+                "ALWAYS call yaml_validator on your output before finishing — never skip validation."
             ),
             tools=[FileReadTool(), YAMLValidatorTool()],
         )
@@ -564,17 +281,22 @@ class MlOpsFlow(Flow[AppState]):
     def ops_step(self) -> str:
         ops = self._agent(
             role="Ops / Execution Agent",
-            goal="Execute kubectl commands to manage cluster resources",
+            goal="Execute kubectl commands and tools to manage cluster resources — never reason about state without calling a tool first",
             backstory=(
                 "You manage the Kubernetes cluster and ML model deployments. "
-                "Use kubectl_read for queries (get, describe, logs, top). "
-                "Use kubectl_write for mutations (create, scale, delete, rollout). "
-                "Use model_version_update to switch ML model versions (e.g. v1→v2) by updating deployment image tags. "
-                "Use inference_client to test ML service endpoints (health checks, predictions, metrics). "
-                "The ML inference service runs on NodePort 30081: health at http://localhost:30081/health, "
-                "predictions at http://localhost:30081/predict, metrics at http://localhost:30081/metrics. "
-                "Always verify mutations with kubectl_read after executing them. "
-                "Summarize results in clear natural language."
+                "ALWAYS call a tool — never guess or reason from memory about cluster state.\n"
+                "Tool usage rules:\n"
+                "- kubectl_read: for ALL queries — get, describe, logs, top. Call this first before any mutation.\n"
+                "- kubectl_write: for mutations — scale, delete, apply -f <path>. "
+                "After deploying a new resource, use 'rollout status deployment/<name> --timeout=90s' to wait for it to become ready before health checking.\n"
+                "- model_version_update: REQUIRED for any model version switch (e.g. v1→v2). Do not use kubectl_write for this.\n"
+                "- inference_client: REQUIRED for any health check, prediction request, or metrics fetch from the ML service. "
+                "ML service NodePort 30081: GET http://localhost:30081/health, "
+                "POST http://localhost:30081/predict (empty payload {} uses random input), "
+                "GET http://localhost:30081/metrics.\n"
+                "Never skip tool calls. If asked to check health, call inference_client. "
+                "If asked to switch model version, call model_version_update. "
+                "If asked about pod status, call kubectl_read."
             ),
             tools=[KubectlReadTool(), KubectlWriteTool(), ModelVersionTool(), InferenceClientTool()],
         )
@@ -593,17 +315,21 @@ class MlOpsFlow(Flow[AppState]):
     def monitor_step(self) -> str:
         monitor = self._agent(
             role="Monitoring Agent",
-            goal="Query cluster health, metrics, and alerts",
+            goal="Query cluster health and metrics by calling tools — never report metrics from memory",
             backstory=(
-                "You monitor the cluster and ML services via Prometheus and Grafana when configured. "
-                "Fall back to kubectl_read for pod status and resource usage. "
-                "Use inference_client to check ML service health (http://localhost:30081/health) "
-                "or scrape raw Prometheus metrics (http://localhost:30081/metrics). "
-                "Key ML metrics: ml_requests_total (counter by model_version, predicted_class), "
-                "ml_request_latency_seconds (histogram by model_version). "
+                "You monitor the cluster and ML services. ALWAYS call a tool to retrieve live data.\n"
+                "Tool usage rules:\n"
+                "- prometheus_query: REQUIRED for any Prometheus/PromQL request. "
+                "Key metrics: ml_requests_total (counter, labels: model_version, predicted_class), "
+                "ml_request_latency_seconds (histogram, label: model_version). "
                 "PromQL examples: rate(ml_requests_total[5m]), "
-                "histogram_quantile(0.95, rate(ml_request_latency_seconds_bucket[5m])). "
-                "Recommend scaling actions when you detect issues."
+                "histogram_quantile(0.95, rate(ml_request_latency_seconds_bucket[5m])).\n"
+                "- grafana_alerts: REQUIRED for Grafana alert state queries.\n"
+                "- inference_client: REQUIRED for ML service health/metrics. "
+                "GET http://localhost:30081/health, GET http://localhost:30081/metrics.\n"
+                "- kubectl_read: for pod status, resource usage, events.\n"
+                "Never answer with assumed values. If Prometheus is unavailable, fall back to "
+                "inference_client for /metrics, then kubectl_read. Report what the tool returns."
             ),
             tools=[PrometheusQueryTool(), GrafanaAlertsTool(), KubectlReadTool(), InferenceClientTool()],
         )
@@ -622,10 +348,12 @@ class MlOpsFlow(Flow[AppState]):
     def ingress_step(self) -> str:
         ingress = self._agent(
             role="Ingress / Networking Agent",
-            goal="Manage ingress rules and traffic routing",
+            goal="Manage ingress rules and traffic routing by calling tools",
             backstory=(
                 "You handle ingress configuration, traffic routing, and canary deployments. "
-                "Use kubectl_read to inspect current ingress state and kubectl_write for changes."
+                "ALWAYS call kubectl_read first to inspect current ingress/service state before making changes. "
+                "Use kubectl_write for mutations, then verify with kubectl_read. "
+                "Never assume configuration — always read before writing."
             ),
             tools=[KubectlReadTool(), KubectlWriteTool()],
         )
@@ -661,22 +389,6 @@ class MlOpsFlow(Flow[AppState]):
 # ── Conversation Loop ─────────────────────────────────────────────────────
 
 
-def build_context(history: list[dict]) -> str:
-    if not history:
-        return ""
-    recent = history[-KEEP_MESSAGES:]
-    parts = []
-    for i, h in enumerate(recent):
-        is_recent = i >= len(recent) - KEEP_FULL_OUTPUTS
-        resp = h["full"] if is_recent else h["short"]
-        parts.append(f"User: {h['user']}\nAssistant: {resp}")
-    return (
-        "=== CONVERSATION HISTORY ===\n"
-        + "\n".join(parts)
-        + "\n=== END HISTORY ===\n\n"
-    )
-
-
 def main() -> None:
     llm = resolve_llm()
     memory = ScopedMemory(MEMORY_PATH, MEMORY_COLLECTION) if MEMORY_ENABLED else None
@@ -686,7 +398,7 @@ def main() -> None:
             print(f"Ingested {n} knowledge chunks from {KNOWLEDGE_DIR}/")
     history: list[dict] = []
 
-    print("MLOps Flow Assistant (type 'exit' to quit)\n")
+    print("Kubernetes Flow Assistant (type 'exit' to quit)\n")
 
     while True:
         user_input = input("You: ").strip()
