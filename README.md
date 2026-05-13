@@ -47,12 +47,12 @@ test_agent.py  — Unit + integration tests
 
 ## Setup
 
-**1. Bootstrap cluster (builds images, installs Prometheus/Grafana, deploys all services):**
+**1. Kind Cluster (builds images, installs Prometheus/Grafana, deploys all services):**
 ```bash
 bash k8s/setup.sh
 ```
 
-**2. Set up LLM** (Ollama example):
+**2. Set up LLM** (Ollama example, or bring your own):
 ```bash
 docker run -d -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama
 docker exec -it ollama ollama pull qwen3:8b
@@ -61,10 +61,10 @@ docker exec -it ollama ollama pull qwen3:8b
 **3. Configure environment:**
 ```bash
 cp .env.example .env
-# Set LLM_PROVIDER=ollama or openrouter, add API keys if needed
+# Set up the variables yourself
 ```
 
-**4. Install dependencies:**
+**4. Install dependencies with uv:**
 ```bash
 uv sync
 ```
@@ -87,14 +87,7 @@ You: What is the P95 inference latency?
 Agent: Current P95 latency from Prometheus: 0.032s
 ```
 
-## Running Tests
-
-```bash
-uv run python -m pytest test_agent.py -v -k "TestToolBoundaries or TestMLTools or TestHelpers"  # fast, no LLM
-uv run python -m pytest test_agent.py -v -k "TestFlowRouting"   # LLM integration (needs VPN)
-```
-
-## Running Evaluations
+## Running Evaluations to Reproduce Results
 
 ```bash
 uv run python eval/runner.py --arch flow --levels 1 2
@@ -102,7 +95,7 @@ uv run python eval/runner.py --arch simple --levels 1 2
 uv run python eval/runner.py --arch minimal --levels 1
 ```
 
-## Watch Mode (Level 3 Autonomy)
+## Autonomous Watch Mode 
 
 Monitors cluster health and ML service metrics, remediates issues automatically:
 
@@ -113,4 +106,7 @@ uv run python eval/watch_eval.py --all --output eval_watch_results.json
 
 ## References
 
-- [CrewAI](https://docs.crewai.com/) · [Ollama](https://ollama.ai/) · [Kind](https://kind.sigs.k8s.io/) · [FastAPI](https://fastapi.tiangolo.com/)
+- [CrewAI](https://docs.crewai.com/) 
+- [Ollama](https://ollama.ai/) 
+- [Kind](https://kind.sigs.k8s.io/) 
+- [FastAPI](https://fastapi.tiangolo.com/)
