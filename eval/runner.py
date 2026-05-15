@@ -49,7 +49,7 @@ from src.agent import MlOpsFlow, resolve_llm, run_cmd
 # Paths
 # ---------------------------------------------------------------------------
 
-RESULTS_DIR = Path(__file__).parent / "results"
+RESULTS_DIR = Path(os.getenv("EVAL_RESULTS_DIR", Path(__file__).parent / "results"))
 LOGS_DIR = RESULTS_DIR / "logs"
 
 
@@ -120,13 +120,18 @@ def cleanup_task(task: dict) -> None:
 
 
 def cleanup_eval_resources() -> None:
-    """Remove any leftover eval-* resources from prior runs."""
+    """Remove leftover eval resources"""
+    keep_prefixes = ("monitoring-stack", "prometheus-")
+    keep_exact = {"echo-service", "ml-service", "kubernetes"}
     for kind in ("deployment", "service"):
-        out = run_cmd(f"kubectl get {kind} -o name --no-headers", timeout=10)
+        out = run_cmd(f"kubectl get {kind} -n default -o name --no-headers", timeout=10)
         for line in out.splitlines():
             name = line.split("/")[-1]
-            if name.startswith("eval-"):
-                run_cmd(f"kubectl delete {kind} {name} --ignore-not-found --wait=false", timeout=15)
+            if not name or name in keep_exact:
+                continue
+            if any(name.startswith(p) for p in keep_prefixes):
+                continue
+            run_cmd(f"kubectl delete {kind} {name} -n default --ignore-not-found --wait=false", timeout=15)
 
 
 # ---------------------------------------------------------------------------

@@ -3,26 +3,33 @@ kagent evaluation wrapper.
 Same output schema as eval/runner.py. Reuses all helper functions from it.
 
 Prerequisites:
-    # Install kagent into the cluster (one-time, pick your provider):
+    # Install CRDs and chart:
     helm install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \\
-        --namespace kagent --create-namespace
+        --version 0.9.4 --namespace kagent --create-namespace
     helm install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \\
-        --namespace kagent \\
-        --set providers.default=openAI \\
-        --set providers.openAI.apiKey=dummy \\
-        --set providers.openAI.baseUrl=http://localhost:8001/v1
+        --version 0.9.4 --namespace kagent \\
+        --set providers.default=openAI --set providers.openAI.apiKey=placeholder
+
+    # Configure ModelConfig CRD (replaces default-model-config):
+    # The Helm chart does NOT support baseUrl — must use ModelConfig CRD.
+    # See research notes; needs CoreDNS host.docker.internal alias + socat bridge.
 
     # Install kagent CLI:
-    # https://kagent.dev/docs/kagent/introduction/installation
+    curl -sL https://github.com/kagent-dev/kagent/releases/download/v0.9.4/kagent-linux-amd64 \\
+        -o ~/.local/bin/kagent && chmod +x ~/.local/bin/kagent
+
+    # Port-forward the controller before running this script:
+    kubectl -n kagent port-forward svc/kagent-controller 8083:8083 &
 
 Usage:
-    uv run python eval/kagent_runner.py --agent mlops-agent
-    uv run python eval/kagent_runner.py --agent mlops-agent --levels 1 2
+    uv run python eval/kagent_runner.py --agent k8s-agent
+    uv run python eval/kagent_runner.py --agent k8s-agent --levels 1 2
 """
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -31,6 +38,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("LITELLM_LOG", "CRITICAL")
+
+# kagent may be in ~/.local/bin
+_LOCAL_BIN = Path.home() / ".local" / "bin"
+os.environ["PATH"] = f"{_LOCAL_BIN}:{os.environ.get('PATH', '')}"
 
 from eval.runner import (
     RESULTS_DIR,
@@ -48,20 +59,55 @@ from eval.runner import (
 )
 
 
+def _detect_model() -> str:
+    """Read the kagent ModelConfig CRD to identify which LLM is in use."""
+    try:
+        out = subprocess.run(
+            ["kubectl", "-n", "kagent", "get", "modelconfig", "default-model-config",
+             "-o", "jsonpath={.spec.model}"],
+            capture_output=True, text=True, timeout=10
+        )
+        m = out.stdout.strip()
+        return m.replace(":", "-").replace(".", "-").replace("/", "-") or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def make_output_path(agent: str, levels: list[int] | None) -> Path:
     RESULTS_DIR.mkdir(exist_ok=True)
     levels_tag = "L" + "".join(str(l) for l in sorted(levels)) if levels else "Lall"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return RESULTS_DIR / f"results_kagent_{agent}_{levels_tag}_{ts}.json"
+    model_tag = _detect_model()
+    return RESULTS_DIR / f"results_kagent_{agent}_{model_tag}_{levels_tag}_{ts}.json"
+
+
+def _extract_response(raw_stdout: str) -> str:
+    """Parse kagent's JSON output and extract the final answer.
+    The CLI returns a Task object with artifacts[0].parts[0].text being the final
+    assistant message. Thinking-model responses include a </think> block we strip."""
+    try:
+        data = json.loads(raw_stdout)
+        text = data["artifacts"][0]["parts"][0]["text"]
+        # Strip everything up to and including </think>
+        if "</think>" in text:
+            text = text.split("</think>", 1)[1]
+        return text.strip()
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return raw_stdout.strip()
 
 
 def run_kagent_task(prompt: str, agent: str, log_path: Path | None) -> dict:
-    cmd = ["kagent", "invoke", "-t", prompt, "--agent", agent]
+    cmd = ["kagent", "invoke", "-t", prompt, "--agent", agent, "-o", "json", "--timeout", "180s"]
     start = time.time()
     try:
-        with suppress_agent_output(log_path):
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        response = result.stdout.strip() or result.stderr.strip() or "(no output)"
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=200)
+        if log_path:
+            with open(log_path, "a") as f:
+                f.write(f"--- {prompt[:60]} ---\nstdout: {result.stdout}\nstderr: {result.stderr}\n")
+        if result.returncode != 0 and not result.stdout.strip():
+            response = f"Error: kagent CLI returned {result.returncode}: {result.stderr.strip()[:200]}"
+        else:
+            response = _extract_response(result.stdout) or "(no output)"
     except subprocess.TimeoutExpired:
         response = "Error: timeout"
     except FileNotFoundError:

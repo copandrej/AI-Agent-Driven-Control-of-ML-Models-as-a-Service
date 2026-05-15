@@ -31,6 +31,50 @@ DEFAULT_LATENCY_THRESHOLD = 0.1
 DEFAULT_MAX_REPLICAS = 5
 DEFAULT_LOG_FILE = "watch_log.jsonl"
 
+# ── Tier 2: LLM decision ─────────────────────────────────────────────
+# Allowed actions the LLM may choose. Each maps to a deterministic
+# kubectl command in the action executors below.
+_ALLOWED_ACTIONS = ["restart", "diagnose", "scale_up", "rollback", "wait"]
+
+_LLM = None  # lazy-initialised on first use
+
+def _get_llm():
+    global _LLM
+    if _LLM is None:
+        from .agent import resolve_llm
+        _LLM = resolve_llm()
+    return _LLM
+
+
+def llm_decide(observation: str, allowed: list[str] = _ALLOWED_ACTIONS,
+               timeout_s: int = 20) -> dict | None:
+    """Tier 2: ask LLM to pick an action from `allowed` given observation.
+    Returns {"action": <str>, "reason": <str>} or None on failure (caller falls back to Tier 1)."""
+    prompt = (
+        "You are an autonomous Kubernetes operator. Given the observation below, "
+        "pick ONE action from the allowed list.\n\n"
+        f"Observation:\n{observation}\n\n"
+        f"Allowed actions: {', '.join(allowed)}\n\n"
+        "Reply with JSON only, no other text:\n"
+        '{"action": "<one of the allowed actions>", "reason": "<one short sentence>"}'
+    )
+    try:
+        llm = _get_llm()
+        resp = llm.call([{"role": "user", "content": prompt}])
+        text = str(resp)
+        # Strip <think> blocks emitted by reasoning models
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        m = re.search(r'\{[^{}]*"action"\s*:\s*"([^"]+)"[^{}]*\}', text, re.DOTALL)
+        if not m:
+            return None
+        action = m.group(1).strip().lower()
+        if action not in allowed:
+            return None
+        reason_m = re.search(r'"reason"\s*:\s*"([^"]*)"', text)
+        return {"action": action, "reason": reason_m.group(1) if reason_m else ""}
+    except Exception:
+        return None
+
 SERVICES = [
     {"name": "ml-service", "namespace": "default", "health_url": "http://localhost:30081/health", "metrics_url": "http://localhost:30081/metrics"},
 ]
@@ -123,7 +167,11 @@ def check_latency(metrics_url: str, threshold: float) -> dict:
         return {"exceeded": latency > threshold, "p95": round(latency, 4), "threshold": threshold,
                 "note": "http_roundtrip"}
     except Exception:
-        pass
+        # Predict timeout/error == effectively infinite latency → exceeded
+        elapsed = time.time() - t0
+        if elapsed >= 9.5:  # request hit the 10s urlopen timeout
+            return {"exceeded": True, "p95": round(elapsed, 4), "threshold": threshold,
+                    "note": "predict_timeout"}
     # Fallback: Prometheus histogram
     try:
         with urlopen(Request(metrics_url), timeout=10) as r:
@@ -142,25 +190,30 @@ def handle_pod_issue(issue: dict, dry_run: bool) -> dict:
     pod, status, ns = issue["pod"], issue["status"], issue["namespace"]
     observation = f"Pod {pod} in {ns} is {status}"
 
-    if status in ("CrashLoopBackOff", "Error"):
+    # LLM picks the action; deterministic fallback if it errors out
+    decision = llm_decide(observation, allowed=["restart", "diagnose", "wait"])
+    if decision:
+        action_type, tier = decision["action"], "llm"
+    else:
+        action_type = "restart" if status in ("CrashLoopBackOff", "Error") else "diagnose"
+        tier = "deterministic"
+
+    if action_type == "restart":
         action = f"kubectl delete pod {pod} -n {ns}"
-        action_type = "restart"
-    elif status in ("ImagePullBackOff", "ErrImagePull"):
-        action = f"kubectl describe pod {pod} -n {ns}"
-        action_type = "diagnose"
+    elif action_type == "wait":
+        action = "none"
     else:
         action = f"kubectl describe pod {pod} -n {ns}"
-        action_type = "diagnose"
 
-    if dry_run:
-        result = "(dry run)"
+    if dry_run or action == "none":
+        result = "(dry run)" if dry_run else "(no action)"
         executed = False
     else:
         result = run_cmd(action, timeout=15)
         executed = True
 
     return make_decision("pod_health", observation, action, action_type,
-                         result[:500], "deterministic", executed, time.time() - start)
+                         result[:500], tier, executed, time.time() - start)
 
 
 def handle_high_latency(service: dict, latency_info: dict, max_replicas: int, dry_run: bool) -> dict | None:

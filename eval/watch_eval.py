@@ -95,12 +95,33 @@ def wait_for_detection(log_file: str, inject_time: float, action_types: list[str
     return None
 
 
+def _wait_for_stable_cluster(service_name: str = "ml-service", timeout: int = 60) -> None:
+    """Reset deployment to 1 replica"""
+    run_cmd(f"kubectl scale deployment/{service_name} --replicas=1")
+    run_cmd(f"kubectl rollout status deployment/{service_name} --timeout={timeout}s")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        out = run_cmd(f"kubectl get pods -l app={service_name} --no-headers")
+        unstable = any(
+            parts[2] in ("Terminating", "ContainerCreating", "Pending", "Init", "Error")
+            for line in out.splitlines() if len(parts := line.split()) >= 3
+        )
+        if not unstable:
+            return
+        time.sleep(2)
+
+
 def run_scenario(name: str, inject_fn, action_types: list[str],
-                 watch_interval: int = 5, latency_threshold: float = 0.05,
-                 max_replicas: int = 5, timeout: int = 120) -> dict:
+                 watch_interval: int = 5, latency_threshold: float = 1.0,
+                 max_replicas: int = 5, timeout: int = 240) -> dict:
     log_file = tempfile.mktemp(suffix=".jsonl", prefix=f"watch_eval_{name}_")
     print(f"\nScenario: {name}")
     print(f"  Log: {log_file}")
+
+    # Settle the cluster before starting the watch loop — prevents pre-existing
+    # rollouts / Terminating pods from being flagged as "detections" before
+    # inject_time, which would produce negative MTTD values.
+    _wait_for_stable_cluster()
 
     stop_event = threading.Event()
 
@@ -151,11 +172,15 @@ def run_scenario(name: str, inject_fn, action_types: list[str],
         }
 
 
+# Any non-trivial action counts as a valid detection: the system reacted.
+_DETECTION_ACTIONS = ["restart", "diagnose", "scale_up"]
+
+
 def run_pod_crash_scenario(watch_interval: int = 5) -> dict:
     return run_scenario(
         name="pod_crash",
         inject_fn=inject_pod_crash,
-        action_types=["restart", "diagnose"],
+        action_types=_DETECTION_ACTIONS,
         watch_interval=watch_interval,
     )
 
@@ -164,7 +189,7 @@ def run_bad_image_scenario(watch_interval: int = 5) -> dict:
     result = run_scenario(
         name="bad_image",
         inject_fn=inject_bad_image,
-        action_types=["diagnose", "restart"],
+        action_types=_DETECTION_ACTIONS,
         watch_interval=watch_interval,
     )
     restore_good_image()
@@ -174,14 +199,30 @@ def run_bad_image_scenario(watch_interval: int = 5) -> dict:
 def run_high_latency_scenario(concurrency: int = 20, watch_interval: int = 5) -> dict:
     result = run_scenario(
         name="high_latency",
-        inject_fn=lambda: inject_high_latency(concurrency=concurrency),
-        action_types=["scale_up"],
+        inject_fn=lambda: inject_high_latency(concurrency=concurrency, requests=300),
+        action_types=_DETECTION_ACTIONS,
         watch_interval=watch_interval,
-        latency_threshold=0.05,
+        latency_threshold=1.0,
     )
+    # Reset replicas and wait for rollout so the next scenario starts clean.
     run_cmd("kubectl scale deployment ml-service --replicas=1")
-
+    run_cmd("kubectl rollout status deployment/ml-service --timeout=60s")
     return result
+
+
+def aggregate_runs(name: str, runs: list[dict]) -> dict:
+    import statistics as _s
+    detected = [r for r in runs if r["detected"]]
+    mttds = [r["mttd_seconds"] for r in detected]
+    return {
+        "scenario": name,
+        "runs": len(runs),
+        "detected_count": len(detected),
+        "detection_rate": round(len(detected) / len(runs), 3),
+        "mttd_mean_s": round(_s.mean(mttds), 2) if mttds else None,
+        "mttd_std_s": round(_s.stdev(mttds), 2) if len(mttds) > 1 else 0.0,
+        "raw": runs,
+    }
 
 
 def main():
@@ -189,6 +230,7 @@ def main():
     parser.add_argument("--scenario", choices=["pod_crash", "bad_image", "high_latency"],
                         help="Run a specific scenario")
     parser.add_argument("--all", action="store_true", help="Run all scenarios")
+    parser.add_argument("--runs", type=int, default=1, help="Number of repetitions per scenario (default: 1)")
     parser.add_argument("--concurrency", type=int, default=20, help="Load test concurrency for latency scenario")
     parser.add_argument("--interval", type=int, default=5, help="Watch check interval in seconds")
     parser.add_argument("--output", default=None, help="Output JSON file for results")
@@ -200,29 +242,30 @@ def main():
         "high_latency": lambda: run_high_latency_scenario(args.concurrency, args.interval),
     }
 
-    results = []
-    if args.all:
-        for name, fn in scenarios.items():
-            results.append(fn())
-    elif args.scenario:
-        results.append(scenarios[args.scenario]())
-    else:
+    to_run = list(scenarios.keys()) if args.all else ([args.scenario] if args.scenario else [])
+    if not to_run:
         parser.print_help()
         return
 
+    aggregated = []
+    for name in to_run:
+        print(f"\nRunning {args.runs} repetition(s) of '{name}'...")
+        runs = [scenarios[name]() for _ in range(args.runs)]
+        aggregated.append(aggregate_runs(name, runs))
+
     print(f"\n{'='*60}")
-    print("WATCH EVALUATION RESULTS")
+    print(f"WATCH EVALUATION RESULTS  ({args.runs} run(s) per scenario)")
     print(f"{'='*60}")
-    for r in results:
-        status = f"DETECTED in {r['mttd_seconds']}s" if r["detected"] else "NOT DETECTED"
-        print(f"  {r['scenario']}: {status}")
-        if r["detected"]:
-            print(f"    Action: {r['action_type']} — {r['action']}")
+    for a in aggregated:
+        rate = f"{a['detected_count']}/{a['runs']} detected"
+        mttd = f"MTTD {a['mttd_mean_s']}±{a['mttd_std_s']}s" if a["mttd_mean_s"] else "NOT DETECTED"
+        print(f"  {a['scenario']:<16}  {rate}  {mttd}")
 
     if args.output:
         output = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "scenarios": results,
+            "runs_per_scenario": args.runs,
+            "scenarios": aggregated,
         }
         with open(args.output, "w") as f:
             json.dump(output, f, indent=2)

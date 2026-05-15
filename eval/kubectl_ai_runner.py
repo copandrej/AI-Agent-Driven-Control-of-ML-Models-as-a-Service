@@ -3,19 +3,20 @@ kubectl-ai evaluation wrapper.
 Same output schema as eval/runner.py. Reuses all helper functions from it.
 
 Prerequisites:
-    curl -sSL https://raw.githubusercontent.com/GoogleCloudPlatform/kubectl-ai/main/install.sh | bash
+    # Download binary to ~/.local/bin (no sudo needed):
+    curl -fsSL https://github.com/GoogleCloudPlatform/kubectl-ai/releases/download/v0.0.31/kubectl-ai_Linux_x86_64.tar.gz \\
+        | tar xz -C ~/.local/bin kubectl-ai
 
 Usage:
-    # OpenAI-compat endpoint (HPC):
-    OPENAI_ENDPOINT=http://localhost:8001/v1 OPENAI_API_KEY=dummy \\
-        uv run python eval/kubectl_ai_runner.py --model Qwen-Qwen3.5-122B-A10B
-
-    # Ollama:
-    uv run python eval/kubectl_ai_runner.py --model qwen3.5:9b --provider ollama
+    # Ollama (only supported provider — OpenAI-compat endpoints fail due to
+    # tool_choice:"auto" incompatibility and ReAct shim JSON format mismatch):
+    OLLAMA_HOST=http://193.2.205.14:11434 \\
+        uv run python eval/kubectl_ai_runner.py --model qwen3.5:9b-64k --provider ollama
 """
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -24,6 +25,12 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("LITELLM_LOG", "CRITICAL")
+
+# kubectl-ai may be in ~/.local/bin which isn't always on PATH
+_LOCAL_BIN = Path.home() / ".local" / "bin"
+os.environ["PATH"] = f"{_LOCAL_BIN}:{os.environ.get('PATH', '')}"
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 from eval.runner import (
     RESULTS_DIR,
@@ -54,20 +61,25 @@ def run_kubectl_ai_task(prompt: str, model: str, provider: str, log_path: Path |
     if provider == "ollama":
         cmd += ["--llm-provider", "ollama"]
     else:
-        # openai-compat: set OPENAI_ENDPOINT in env
-        cmd += ["--llm-provider", "openai"]
+        # OpenAI-compat (HPC vLLM): use tool-use-shim because vLLM's native
+        # tool-call parsers don't reliably handle kubectl-ai's complex tool
+        # schemas with embedded JSON in descriptions. The shim does text-based
+        # ReAct tool calling which works with any model that can follow instructions.
+        cmd += ["--llm-provider", "openai", "--enable-tool-use-shim"]
     cmd.append(prompt)
 
     start = time.time()
     try:
-        env = {**os.environ}
-        with suppress_agent_output(log_path):
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
-        response = (result.stdout + result.stderr).strip() or "(no output)"
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        raw = (result.stdout + result.stderr).strip()
+        response = _ANSI.sub("", raw) or "(no output)"
+        if log_path:
+            with open(log_path, "a") as f:
+                f.write(f"--- {prompt[:60]} ---\n{raw}\n")
     except subprocess.TimeoutExpired:
         response = "Error: timeout"
     except FileNotFoundError:
-        response = "Error: kubectl-ai not installed (run install.sh first)"
+        response = "Error: kubectl-ai not installed — run: curl -fsSL .../kubectl-ai_Linux_x86_64.tar.gz | tar xz -C ~/.local/bin kubectl-ai"
     except Exception as e:
         response = f"Error: {e}"
     return {"response": response, "elapsed": round(time.time() - start, 2)}

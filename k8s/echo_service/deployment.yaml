@@ -14,8 +14,8 @@ spec:
     spec:
       containers:
       - name: echo-service
-        image: echo-service:latest
-        imagePullPolicy: Never
+        image: copandrej/echo-service:latest
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
         resources:

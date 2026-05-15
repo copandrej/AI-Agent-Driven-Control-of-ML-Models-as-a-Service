@@ -20,8 +20,8 @@ spec:
     spec:
       containers:
       - name: ml-service
-        image: ml-service:latest
-        imagePullPolicy: Never
+        image: copandrej/ml-service:latest
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
         env:
