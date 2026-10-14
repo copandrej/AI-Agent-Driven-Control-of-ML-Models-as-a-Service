@@ -3,7 +3,8 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # CPU-only PyTorch + dependencies
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir typing-extensions && \
+    pip install --no-cache-dir \
     torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir \
     fastapi uvicorn numpy prometheus-client

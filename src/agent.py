@@ -61,6 +61,13 @@ class ReActLLM(LLM):
     def supports_function_calling(self) -> bool:
         return False
 
+    def call(self, messages, *args, **kwargs):
+        # Strict chat templates (e.g. Qwen3.5 on vLLM) reject system messages after the first
+        if isinstance(messages, list):
+            messages = [{**m, "role": "user"} if i and m.get("role") == "system" else m
+                        for i, m in enumerate(messages)]
+        return super().call(messages, *args, **kwargs)
+
 
 def resolve_llm() -> LLM:
     provider = os.getenv("LLM_PROVIDER")
@@ -76,6 +83,10 @@ def resolve_llm() -> LLM:
         os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_COMPAT_API_KEY", "dummy")
         model = f"openai/{os.getenv('OPENAI_COMPAT_MODEL', 'default')}"
         temperature = float(os.getenv("OPENAI_COMPAT_TEMPERATURE", os.getenv("OLLAMA_TEMPERATURE", "0.4")))
+        # disable TLS verification for endpoints with self-signed certs
+        if os.getenv("OPENAI_COMPAT_SSL_VERIFY", "True").lower() == "false":
+            import litellm
+            litellm.ssl_verify = False
     elif provider == "openrouter":
         os.environ["OPENROUTER_API_KEY"] = os.getenv("OPENROUTER_API_KEY", "")
         model = f"openrouter/{os.getenv('OPENROUTER_MODEL', 'z-ai/glm-4.5-air:free')}"
