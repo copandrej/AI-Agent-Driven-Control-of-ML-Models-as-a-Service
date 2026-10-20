@@ -182,14 +182,17 @@ tasks:
     prompt: "Update the ML service model to version v2"
     success_criteria:
       response_keywords: ["v2", "update", "version", "rollout", "image"]
-      cluster_check:
-        command: "kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
-        expected: "v2"
+      cluster_check:  # the running service must serve v2 (resnet50), not just the spec
+        command: >-
+          kubectl rollout status deployment/ml-service --timeout=45s >/dev/null 2>&1;
+          sleep 5; curl -s -m 10 --retry 3 --retry-all-errors http://localhost:30081/health
+        expected: "resnet50"
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "sleep 8"
+      - "kubectl rollout status deployment/ml-service --timeout=25s"
     cleanup_commands:
-      - "kubectl set image deployment/ml-service ml-service=ml-service:v1"
+      - "kubectl set env deployment/ml-service MODEL_NAME- MODEL_VERSION-"
+      - "kubectl set image deployment/ml-service ml-service=copandrej/ml-service:v1"
 
   - id: L2-05
     level: 2
@@ -240,12 +243,14 @@ tasks:
     prompt: "What model version is currently deployed for the ML service?"
     success_criteria:
       response_keywords: ["v1", "v2", "version", "image", "ml-service"]
-      cluster_check:
-        command: "kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
+      cluster_check:  # the version the running service reports must appear in the answer
+        command: >-
+          curl -s -m 10 http://localhost:30081/health |
+          python3 -c "import json,sys; print(json.load(sys.stdin)['model_version'])"
         in_response: true
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "sleep 8"
+      - "kubectl rollout status deployment/ml-service --timeout=25s"
     cleanup_commands: []
 
   - id: L2-09
@@ -268,14 +273,18 @@ tasks:
     prompt: "Rollback the ML service model from v2 back to v1"
     success_criteria:
       response_keywords: ["v1", "rollback", "version", "update", "image"]
-      cluster_check:
-        command: "kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
-        expected: "v1"
+      cluster_check:  # the running service must serve v1 (mobilenet_v2) again
+        command: >-
+          kubectl rollout status deployment/ml-service --timeout=45s >/dev/null 2>&1;
+          sleep 5; curl -s -m 10 --retry 3 --retry-all-errors http://localhost:30081/health
+        expected: "mobilenet_v2"
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "kubectl set image deployment/ml-service ml-service=ml-service:v2"
-      - "sleep 8"
-    cleanup_commands: []
+      - "kubectl set image deployment/ml-service ml-service=copandrej/ml-service:v2"
+      - "kubectl rollout status deployment/ml-service --timeout=25s"
+    cleanup_commands:
+      - "kubectl set env deployment/ml-service MODEL_NAME- MODEL_VERSION-"
+      - "kubectl set image deployment/ml-service ml-service=copandrej/ml-service:v1"
 
   - id: L2-11
     level: 2
@@ -344,9 +353,11 @@ tasks:
     prompt: "Deploy the ML service from k8s/ml_service/deployment.yaml, verify it is healthy, then update it to model version v2"
     success_criteria:
       response_keywords: ["ml-service", "healthy", "v2", "deploy", "version"]
-      cluster_check:
-        command: "kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].image}'"
-        expected: "v2"
+      cluster_check:  # the running service must serve v2 (resnet50), not just the spec
+        command: >-
+          kubectl rollout status deployment/ml-service --timeout=45s >/dev/null 2>&1;
+          sleep 5; curl -s -m 10 --retry 3 --retry-all-errors http://localhost:30081/health
+        expected: "resnet50"
     setup_commands:
       - "kubectl delete deployment ml-service --ignore-not-found"
       - "kubectl delete service ml-service --ignore-not-found"

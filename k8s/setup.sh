@@ -30,21 +30,16 @@ kind create cluster --name "$CLUSTER_NAME" --config "$SCRIPT_DIR/kind-config.yam
 echo ""
 echo "=== Building Docker Images ==="
 
-echo "Building echo-service:latest..."
-docker build -t echo-service:latest "$SCRIPT_DIR/echo_service"
+# Same names as on Docker Hub, so the manifests work on Kind (local images) and other clusters (pull)
+echo "Building copandrej/echo-service:latest..."
+docker build -t copandrej/echo-service:latest "$SCRIPT_DIR/echo_service"
 
-echo "Building ml-service:latest..."
-docker build -t ml-service:latest "$SCRIPT_DIR/ml_service"
-
-echo "Tagging ml-service versioned images..."
-docker tag ml-service:latest ml-service:v1
-docker tag ml-service:latest ml-service:v2
+echo "Building copandrej/ml-service:v1 (mobilenet_v2) and :v2 (resnet50)..."
+docker build -t copandrej/ml-service:v1 "$SCRIPT_DIR/ml_service"
+docker build -t copandrej/ml-service:v2 --build-arg MODEL_NAME=resnet50 --build-arg MODEL_VERSION=v2 "$SCRIPT_DIR/ml_service"
 
 echo "Loading images into Kind..."
-kind load docker-image echo-service:latest --name "$CLUSTER_NAME"
-kind load docker-image ml-service:latest --name "$CLUSTER_NAME"
-kind load docker-image ml-service:v1 --name "$CLUSTER_NAME"
-kind load docker-image ml-service:v2 --name "$CLUSTER_NAME"
+kind load docker-image copandrej/echo-service:latest copandrej/ml-service:v1 copandrej/ml-service:v2 --name "$CLUSTER_NAME"
 
 # ── Prometheus + Grafana ─────────────────────────────────────────────────
 
@@ -54,10 +49,12 @@ echo "=== Installing Prometheus Stack ==="
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
 helm repo update
 
+# Pinned for reproducibility; Grafana can need >5m to become ready on slower machines
 helm install monitoring-stack prometheus-community/kube-prometheus-stack \
+    --version 92.10.1 \
     -f "$SCRIPT_DIR/prometheus-values.yaml" \
     --namespace default \
-    --wait --timeout 5m
+    --wait --timeout 10m
 
 # ── Deploy services ──────────────────────────────────────────────────────
 

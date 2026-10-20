@@ -15,8 +15,10 @@ RUN python download_models.py && rm download_models.py
 
 COPY main.py .
 
-# Model selection at runtime (mobilenet_v2 or resnet50)
-ENV MODEL_NAME=mobilenet_v2
-ENV MODEL_VERSION=v1
+# Model version baked into the image: v1 = mobilenet_v2 (default), v2 = resnet50 (see k8s/setup.sh)
+ARG MODEL_NAME=mobilenet_v2
+ARG MODEL_VERSION=v1
+ENV MODEL_NAME=$MODEL_NAME
+ENV MODEL_VERSION=$MODEL_VERSION
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

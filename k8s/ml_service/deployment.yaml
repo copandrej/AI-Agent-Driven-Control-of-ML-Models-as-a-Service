@@ -20,15 +20,10 @@ spec:
     spec:
       containers:
       - name: ml-service
-        image: copandrej/ml-service:latest
+        image: copandrej/ml-service:v1  # model version is defined by the image tag (v1, v2)
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
-        env:
-        - name: MODEL_NAME
-          value: "mobilenet_v2"
-        - name: MODEL_VERSION
-          value: "v1"
         resources:
           requests:
             cpu: "500m"

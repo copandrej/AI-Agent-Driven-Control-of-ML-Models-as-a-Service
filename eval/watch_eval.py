@@ -53,7 +53,7 @@ def inject_bad_image(service_name: str = "ml-service", namespace: str = "default
 
 
 def restore_good_image(service_name: str = "ml-service", namespace: str = "default") -> None:
-    run_cmd(f"kubectl set image deployment/{service_name} {service_name}={service_name}:latest -n {namespace}")
+    run_cmd(f"kubectl set image deployment/{service_name} {service_name}=copandrej/{service_name}:v1 -n {namespace}")
     run_cmd(f"kubectl rollout status deployment/{service_name} -n {namespace} --timeout=60s")
 
 

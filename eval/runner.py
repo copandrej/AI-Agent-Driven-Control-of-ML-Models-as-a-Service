@@ -148,7 +148,7 @@ def check_cluster_state(cluster_check: dict | None, response: str = "") -> dict 
     if not cluster_check:
         return None
     cmd = cluster_check["command"]
-    actual = run_cmd(cmd, timeout=15)
+    actual = run_cmd(cmd, timeout=60)  # checks may wait for a rollout before reading state
     actual_norm = "" if actual.strip() in ("(no output)", "(no resources found)", "") else actual.strip()
     if cluster_check.get("in_response"):
         # Verify the actual cluster value appears verbatim in the agent's response.
