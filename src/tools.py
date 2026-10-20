@@ -6,6 +6,7 @@ Add new tools here; import the subset you need in each architecture file.
 """
 
 import os
+import shlex
 import subprocess
 import tempfile
 from urllib.parse import quote_plus
@@ -19,9 +20,10 @@ from pydantic import BaseModel, Field, model_validator
 # ── Helpers (used internally by tools) ────────────────────────────────────
 
 
-def run_cmd(cmd: str, timeout: int = 40) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = 40) -> str:
+    # list → exec directly (no shell), so ;, &&, |, $() in args can't chain commands
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=timeout)
         out = r.stdout.strip()
         err = r.stderr.strip()
         if r.returncode == 0:
@@ -64,10 +66,13 @@ class KubectlReadTool(BaseTool):
     args_schema: type[BaseModel] = _CmdIn
 
     def _run(self, command: str) -> str:
-        cmd = command.strip()
-        if not cmd.startswith(("get ", "describe ", "logs ", "top ")):
+        try:
+            args = shlex.split(command)
+        except ValueError as e:
+            return f"Error: {e}"
+        if not args or args[0] not in {"get", "describe", "logs", "top"}:
             return "Denied: read-only tool — only get/describe/logs/top allowed."
-        return run_cmd(f"kubectl {cmd}")
+        return run_cmd(["kubectl", *args])
 
 
 class KubectlWriteTool(BaseTool):
@@ -82,11 +87,14 @@ class KubectlWriteTool(BaseTool):
     args_schema: type[BaseModel] = _CmdIn
 
     def _run(self, command: str) -> str:
-        cmd = command.strip()
-        allowed = ("create ", "scale ", "delete ", "rollout ", "expose ", "label ", "annotate ", "patch ", "apply ")
-        if not cmd.startswith(allowed):
+        try:
+            args = shlex.split(command)
+        except ValueError as e:
+            return f"Error: {e}"
+        allowed = {"create", "scale", "delete", "rollout", "expose", "label", "annotate", "patch", "apply"}
+        if not args or args[0] not in allowed:
             return "Denied: allowed verbs are create/scale/delete/rollout/expose/label/annotate/patch/apply."
-        return run_cmd(f"kubectl {cmd}")
+        return run_cmd(["kubectl", *args])
 
 
 # ── Manifest tool ──────────────────────────────────────────────────────────

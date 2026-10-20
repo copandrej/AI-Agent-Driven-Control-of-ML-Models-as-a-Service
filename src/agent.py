@@ -153,6 +153,8 @@ class AppState(BaseModel):
 
 
 class MlOpsFlow(Flow[AppState]):
+    # crewai's auto Memory() is overwritten below anyway; skipping it avoids importing lancedb (needs AVX2)
+    _skip_auto_memory = True
 
     def __init__(self, llm: LLM, memory: "ScopedMemory | None" = None):
         super().__init__()

@@ -22,7 +22,7 @@ src/           — Agentic framework
   watch.py     — Autonomous watch mode (Level 3 self-healing loop)
 
 eval/          — Evaluation framework
-  tasks.yaml   — 25 benchmark tasks at L1/L2/L3 complexity
+  tasks.yaml   — 25 benchmark tasks at L1/L2 complexity (L3 = watch_eval.py)
   runner.py    — Automated eval harness (flow/simple/minimal architectures)
   watch_eval.py — Fault injection evaluation for watch mode
   load_test.py — Async load tester for measuring latency
@@ -90,9 +90,9 @@ Agent: Current P95 latency from Prometheus: 0.032s
 ## Running Evaluations to Reproduce Results
 
 ```bash
-uv run python eval/runner.py --arch flow --levels 1 2
-uv run python eval/runner.py --arch simple --levels 1 2
-uv run python eval/runner.py --arch minimal --levels 1
+uv run python eval/runner.py --archs flow --levels 1 2
+uv run python eval/runner.py --archs simple --levels 1 2
+uv run python eval/runner.py --archs minimal --levels 1
 ```
 
 ## Autonomous Watch Mode 
