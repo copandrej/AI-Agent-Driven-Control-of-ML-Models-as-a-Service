@@ -44,6 +44,7 @@ for _name in ["crewai", "litellm", "httpx", "openai", "chromadb", "httpcore", "u
     _log.propagate = False
 
 from src.agent import MlOpsFlow, resolve_llm, run_cmd
+from eval.task_trace import TraceRecorder, snapshot, state_diff
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -165,6 +166,7 @@ def check_cluster_state(cluster_check: dict | None, response: str = "") -> dict 
 
 def run_flow_task(llm, prompt: str, log_path: Path | None) -> dict:
     start = time.time()
+    flow = None
     try:
         with suppress_agent_output(log_path):
             flow = MlOpsFlow(llm=llm, memory=None)
@@ -172,7 +174,8 @@ def run_flow_task(llm, prompt: str, log_path: Path | None) -> dict:
         response = flow.state.final_response or "(no response)"
     except Exception as e:
         response = f"Error: {e}"
-    return {"response": response, "elapsed": round(time.time() - start, 2)}
+    route = flow.state.intent if flow else None
+    return {"response": response, "elapsed": round(time.time() - start, 2), "route": route}
 
 
 def run_simple_task(llm, prompt: str, log_path: Path | None) -> dict:
@@ -277,7 +280,10 @@ def run_single_task(
     cleanup_task(task)
     setup_preconditions(task, log_path)
 
-    result = _RUNNERS[architecture](llm, task["prompt"], log_path)
+    before = snapshot()
+    with TraceRecorder() as trace:
+        result = _RUNNERS[architecture](llm, task["prompt"], log_path)
+    diff = state_diff(before, snapshot())
 
     criteria = task["success_criteria"]
     kw_passed = check_response_keywords(result["response"], criteria["response_keywords"])
@@ -310,6 +316,11 @@ def run_single_task(
     # Only emit error details on failure
     if not success:
         record["error"] = result["response"][:300]
+    # Compact fault-analysis facts: route (flow only), tool calls, cluster state changes
+    if "route" in result:
+        record["route"] = result["route"]
+    record["trace"] = trace.steps
+    record["diff"] = diff
     return record
 
 
