@@ -18,6 +18,7 @@ ARCH_LABELS = {
     "simple": "Single-Agent",
     "dual": "Dual-Agent",
     "minimal": "Minimal",
+    "bare": "Bare",
 }
 MODEL_LABELS = {
     "Qwen-Qwen3.5-122B-A10B": "Qwen3.5-122B",
@@ -25,7 +26,7 @@ MODEL_LABELS = {
     "qwen3.5:9b-64k": "Qwen3.5-9B",
     "qwen3.5:9b": "Qwen3.5-9B",
 }
-ARCH_ORDER = ["minimal", "simple", "dual", "flow"]
+ARCH_ORDER = ["bare", "minimal", "simple", "dual", "flow"]
 MODEL_ORDER = ["qwen3.5:9b-64k", "qwen3.5:9b", "Qwen-Qwen3.5-122B-A10B", "MiniMaxAI-MiniMax-M2.5"]
 
 

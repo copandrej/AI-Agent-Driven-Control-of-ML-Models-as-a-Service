@@ -6,6 +6,7 @@ Add new tools here; import the subset you need in each architecture file.
 """
 
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -44,6 +45,13 @@ def clean_yaml(text: str) -> str:
     return t.strip()
 
 
+def kubectl_apply(manifest_yaml: str, *flags: str) -> str:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml") as f:
+        f.write(clean_yaml(manifest_yaml))
+        f.flush()
+        return run_cmd(["kubectl", "apply", *flags, "-f", f.name])
+
+
 # ── kubectl tools ──────────────────────────────────────────────────────────
 
 
@@ -57,11 +65,12 @@ class _CmdIn(BaseModel):
 
 
 class KubectlReadTool(BaseTool):
-    """Read-only kubectl: get, describe, logs, top."""
+    """Read-only kubectl: get, describe, logs, top, rollout status/history."""
     name: str = "kubectl_read"
     description: str = (
-        "Read-only kubectl access. Allowed verbs: get, describe, logs, top. "
-        "Use -A for cluster-wide listing. Examples: 'get pods -A', 'describe pod X -n Y', 'top nodes'."
+        "Read-only kubectl access. Allowed: get, describe, logs, top, rollout status, rollout history. "
+        "Use -A for cluster-wide listing. Examples: 'get pods -A', 'describe pod X -n Y', 'top nodes', "
+        "'rollout status deployment/X --timeout=90s'."
     )
     args_schema: type[BaseModel] = _CmdIn
 
@@ -70,8 +79,9 @@ class KubectlReadTool(BaseTool):
             args = shlex.split(command)
         except ValueError as e:
             return f"Error: {e}"
-        if not args or args[0] not in {"get", "describe", "logs", "top"}:
-            return "Denied: read-only tool — only get/describe/logs/top allowed."
+        if not args or not (args[0] in {"get", "describe", "logs", "top"}
+                            or args[:2] in (["rollout", "status"], ["rollout", "history"])):
+            return "Denied: read-only tool — only get/describe/logs/top/rollout status/rollout history allowed."
         return run_cmd(["kubectl", *args])
 
 
@@ -97,6 +107,22 @@ class KubectlWriteTool(BaseTool):
         return run_cmd(["kubectl", *args])
 
 
+class KubectlTool(BaseTool):
+    """Unrestricted kubectl (no read/write separation) — bare baseline only."""
+    name: str = "kubectl"
+    description: str = "Run any kubectl command. Examples: 'get pods -A', 'scale deployment X --replicas=3'."
+    args_schema: type[BaseModel] = _CmdIn
+
+    def _run(self, command: str) -> str:
+        try:
+            args = shlex.split(command)
+        except ValueError as e:
+            return f"Error: {e}"
+        if args[:1] == ["kubectl"]:
+            args = args[1:]
+        return run_cmd(["kubectl", *args])
+
+
 # ── Manifest tool ──────────────────────────────────────────────────────────
 
 
@@ -115,10 +141,7 @@ class ApplyManifestTool(BaseTool):
 
     def _run(self, manifest_yaml: str) -> str:
         try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-                f.write(clean_yaml(manifest_yaml))
-                path = f.name
-            out = run_cmd(f"kubectl apply -f {path}")
+            out = kubectl_apply(manifest_yaml)
             verify = run_cmd("kubectl get pods -A -o wide")
             return f"Apply result:\n{out}\n\nCluster pods:\n{verify}"
         except Exception as e:
@@ -133,9 +156,9 @@ class _YamlIn(BaseModel):
 
 
 class YAMLValidatorTool(BaseTool):
-    """Validate Kubernetes YAML structure."""
+    """Validate Kubernetes YAML structure, then server-side dry run (schema, admission)."""
     name: str = "yaml_validator"
-    description: str = "Validate Kubernetes YAML — returns VALID or INVALID with details."
+    description: str = "Validate Kubernetes YAML (structure + server dry run) — returns VALID or INVALID with details."
     args_schema: type[BaseModel] = _YamlIn
 
     def _run(self, yaml_text: str) -> str:
@@ -149,6 +172,9 @@ class YAMLValidatorTool(BaseTool):
                 for k in ("apiVersion", "kind", "metadata"):
                     if k not in d:
                         return f"INVALID: missing {k}"
+            dry = kubectl_apply(yaml_text, "--dry-run=server")
+            if re.search(r"^(error|Error from server)", dry, re.MULTILINE):
+                return f"INVALID: {dry}"
             return f"VALID: {', '.join(d['kind'] for d in docs)}"
         except Exception as e:
             return f"INVALID: {e}"

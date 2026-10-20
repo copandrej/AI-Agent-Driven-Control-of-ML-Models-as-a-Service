@@ -208,11 +208,23 @@ def run_dual_task(llm, prompt: str, log_path: Path | None) -> dict:
     return {"response": response, "elapsed": round(time.time() - start, 2)}
 
 
+def run_bare_task(llm, prompt: str, log_path: Path | None) -> dict:
+    from src.bare import run_bare
+    start = time.time()
+    try:
+        with suppress_agent_output(log_path):
+            response = run_bare(llm, prompt, "")
+    except Exception as e:
+        response = f"Error: {e}"
+    return {"response": response, "elapsed": round(time.time() - start, 2)}
+
+
 _RUNNERS = {
     "flow": run_flow_task,
     "simple": run_simple_task,
     "minimal": run_minimal_task,
     "dual": run_dual_task,
+    "bare": run_bare_task,
 }
 
 
@@ -459,10 +471,10 @@ Quick commands for ablation study:
     parser.add_argument(
         "--archs",
         nargs="+",
-        choices=["flow", "simple", "minimal", "dual"],
+        choices=list(_RUNNERS),
         default=["flow"],
         metavar="ARCH",
-        help="Architectures to evaluate: flow simple minimal dual (default: flow)",
+        help="Architectures to evaluate: flow simple minimal dual bare (default: flow)",
     )
     parser.add_argument(
         "--levels",
