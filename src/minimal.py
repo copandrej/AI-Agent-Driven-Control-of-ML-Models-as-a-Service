@@ -37,6 +37,7 @@ def run_minimal(llm, user_input: str, history_context: str = "") -> str:
         tools=[KubectlReadTool(), KubectlWriteTool()],
         verbose=VERBOSE,
         max_iter=15,
+        cache=False,  # tools read live cluster state; a cached result would be stale
     )
     prompt = history_context + user_input if history_context else user_input
     task = Task(

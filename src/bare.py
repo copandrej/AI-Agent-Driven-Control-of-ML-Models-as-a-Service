@@ -25,6 +25,7 @@ def run_bare(llm, user_input: str, history_context: str = "") -> str:
         tools=[KubectlTool(), PrometheusQueryTool()],
         verbose=VERBOSE,
         max_iter=25,
+        cache=False,  # tools read live cluster state; a cached result would be stale
     )
     prompt = history_context + user_input if history_context else user_input
     task = Task(description=prompt, expected_output="Response based on tool output", agent=agent)

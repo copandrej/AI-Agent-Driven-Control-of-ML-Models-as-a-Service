@@ -177,6 +177,7 @@ class MlOpsFlow(Flow[AppState]):
         return Agent(
             role=role, goal=goal, backstory=backstory,
             llm=self.llm, tools=tools, verbose=VERBOSE, max_iter=25,
+            cache=False,  # tools read live cluster state; a cached result would be stale
         )
 
     def _run_crew(self, agent: Agent, description: str, expected: str, scope: str) -> str:

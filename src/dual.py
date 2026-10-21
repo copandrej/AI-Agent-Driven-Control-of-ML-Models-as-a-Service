@@ -55,6 +55,7 @@ def _run_main_agent(llm, prompt: str) -> str:
         ],
         verbose=VERBOSE,
         max_iter=25,
+        cache=False,  # tools read live cluster state; a cached result would be stale
     )
     task = Task(
         description=prompt,
@@ -100,6 +101,7 @@ def _run_deploy_subagent(llm, spec: dict) -> str:
         ],
         verbose=VERBOSE,
         max_iter=25,
+        cache=False,  # tools read live cluster state; a cached result would be stale
     )
     task = Task(
         description=f"Deploy the following resource spec to the Kubernetes cluster:\n{json.dumps(spec, indent=2)}\n\nFollow the generate→validate→apply→verify sequence strictly.",
