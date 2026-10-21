@@ -55,6 +55,16 @@ def kubectl_apply(manifest_yaml: str, *flags: str) -> str:
 # ── kubectl tools ──────────────────────────────────────────────────────────
 
 
+def _cmd_timeout(args: list[str], default: int = 40) -> int:
+    """The command's own --timeout (e.g. rollout status --timeout=90s) plus a margin, otherwise the default."""
+    for i, a in enumerate(args):
+        value = a.split("=", 1)[1] if a.startswith("--timeout=") else args[i + 1] if a == "--timeout" and i + 1 < len(args) else None
+        m = re.fullmatch(r"(\d+)(s|m)?", value or "")
+        if m:
+            return min(int(m.group(1)) * (60 if m.group(2) == "m" else 1) + 10, 310)
+    return default
+
+
 class _CmdIn(BaseModel):
     command: str = Field(..., description="kubectl command without 'kubectl' prefix")
 
@@ -82,7 +92,7 @@ class KubectlReadTool(BaseTool):
         if not args or not (args[0] in {"get", "describe", "logs", "top"}
                             or args[:2] in (["rollout", "status"], ["rollout", "history"])):
             return "Denied: read-only tool — only get/describe/logs/top/rollout status/rollout history allowed."
-        return run_cmd(["kubectl", *args])
+        return run_cmd(["kubectl", *args], timeout=_cmd_timeout(args))
 
 
 class KubectlWriteTool(BaseTool):
@@ -104,7 +114,7 @@ class KubectlWriteTool(BaseTool):
         allowed = {"create", "scale", "delete", "rollout", "expose", "label", "annotate", "patch", "apply"}
         if not args or args[0] not in allowed:
             return "Denied: allowed verbs are create/scale/delete/rollout/expose/label/annotate/patch/apply."
-        return run_cmd(["kubectl", *args])
+        return run_cmd(["kubectl", *args], timeout=_cmd_timeout(args))
 
 
 class KubectlTool(BaseTool):
@@ -120,7 +130,7 @@ class KubectlTool(BaseTool):
             return f"Error: {e}"
         if args[:1] == ["kubectl"]:
             args = args[1:]
-        return run_cmd(["kubectl", *args])
+        return run_cmd(["kubectl", *args], timeout=_cmd_timeout(args))
 
 
 # ── Manifest tool ──────────────────────────────────────────────────────────

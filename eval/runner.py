@@ -153,10 +153,11 @@ def check_response_keywords(response: str, keywords: list[str]) -> bool:
     return any(kw.lower() in lower for kw in keywords)
 
 
-def response_numbers(response: str) -> list[float]:
-    """Standalone numbers in the response (not parts of IPs, pod hashes or "P95"); ms are converted to s."""
+def response_numbers(response: str, time_only: bool = False) -> list[float]:
+    """Standalone numbers in the response (not parts of IPs, pod hashes or "P95"); ms are converted to s.
+    time_only keeps only numbers written with a time unit, so "3 minutes" or a bare "3" do not count as 3 s."""
     found = re.findall(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(ms|milliseconds|s|secs?|seconds)?\b", response, re.IGNORECASE)
-    return [float(n) / (1000 if unit.lower().startswith("m") else 1) for n, unit in found]
+    return [float(n) / (1000 if unit.lower().startswith("m") else 1) for n, unit in found if unit or not time_only]
 
 
 def check_cluster_state(cluster_check: dict | None, response: str = "") -> dict | None:
@@ -178,7 +179,8 @@ def check_cluster_state(cluster_check: dict | None, response: str = "") -> dict 
         except ValueError:
             truth = float("nan")
         tol = cluster_check["tolerance"]
-        passed = any(abs(x - truth) <= tol * truth for x in response_numbers(response))
+        numbers = response_numbers(response, time_only=cluster_check.get("unit") == "s")
+        passed = any(abs(x - truth) <= tol * truth for x in numbers)
         return {"passed": passed, "expected": f"(in response ±{tol:.0%}) {actual_norm}", "actual": actual_norm}
     expected = cluster_check["expected"]
     passed = expected.lower() in actual.lower() if expected else actual_norm == ""

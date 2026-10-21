@@ -158,7 +158,11 @@ tasks:
     prompt: "Check if the ML service is healthy by calling its health endpoint at http://localhost:30081/health"
     success_criteria:
       response_keywords: ["healthy", "health", "status", "model"]
-      cluster_check: null
+      cluster_check:  # the model name /health reports must appear in the answer, so the endpoint was actually called
+        command: >-
+          curl -s -m 10 http://localhost:30081/health |
+          python3 -c "import json,sys; print(json.load(sys.stdin)['model_name'])"
+        in_response: true
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
       - "sleep 10"
@@ -232,6 +236,7 @@ tasks:
           --data-urlencode 'query=histogram_quantile(0.95, sum(rate(ml_request_latency_seconds_bucket[5m])) by (le))' |
           python3 -c "import json,sys; print(json.load(sys.stdin)['data']['result'][0]['value'][1])"
         tolerance: 0.25
+        unit: s  # only numbers written with a time unit count
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
       - "kubectl rollout status deployment/ml-service --timeout=60s"
@@ -281,10 +286,14 @@ tasks:
     prompt: "Scrape the raw metrics from the ML service at http://localhost:30081/metrics"
     success_criteria:
       response_keywords: ["ml_requests_total", "ml_request_latency", "metric"]
-      cluster_check: null
+      cluster_check:  # the request count from the raw scrape must appear in the answer
+        command: "curl -s -m 10 http://localhost:30081/metrics | awk '/^ml_request_latency_seconds_count/ {print $NF}'"
+        tolerance: 0
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "sleep 8"
+      - "kubectl rollout restart deployment/ml-service"  # fresh counters, so the scrape shows exactly the 7 below
+      - "kubectl rollout status deployment/ml-service --timeout=60s"
+      - "for i in $(seq 7); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
     cleanup_commands: []
 
   - id: L2-10

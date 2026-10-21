@@ -7,6 +7,7 @@ Routes: deploy | monitor | ingress | ops | general
 Agents: Orchestrator, Coding, Ops, Monitoring, Ingress — each with bounded tools.
 """
 
+import json
 import os
 import re
 
@@ -134,6 +135,32 @@ def clean_response(raw: str) -> str:
     if not result or re.fullmatch(r"[`\s]*", result):
         return "[Agent produced empty response — the model likely exhausted its output on internal reasoning. Try rephrasing the request.]"
     return result
+
+
+def deployment_generations() -> dict[str, int]:
+    try:
+        items = json.loads(run_cmd(["kubectl", "get", "deploy", "-A", "-o", "json"], timeout=30))["items"]
+    except (ValueError, KeyError):
+        return {}
+    return {f"{d['metadata']['namespace']}/{d['metadata']['name']}": d["metadata"].get("generation", 0) for d in items}
+
+
+def with_observed_state(before: dict[str, int], report: str) -> str:
+    """P4 in the control flow: after a write route the system itself reads back every Deployment whose spec
+    changed and puts the observed state above the agent's report, whether or not the agent verified."""
+    if not before:
+        return report
+    after = deployment_generations()
+    lines = [f"- {key}: deleted" for key in before if key not in after]
+    for key, gen in after.items():
+        if before.get(key) != gen:
+            ns, name = key.split("/", 1)
+            status = run_cmd(["kubectl", "rollout", "status", f"deployment/{name}", "-n", ns, "--timeout=60s"], timeout=70)
+            done = "successfully rolled out" in status
+            lines.append(f"- {key}: " + ("rollout complete" if done else f"rollout NOT complete ({status.strip().splitlines()[-1]})"))
+    if not lines:
+        return report
+    return "[System check after the change]\n" + "\n".join(lines) + "\n\n" + report
 
 
 def build_context(history: list[dict]) -> str:
@@ -282,18 +309,22 @@ class MlOpsFlow(Flow[AppState]):
 
     @listen("yaml_valid")
     def ops_apply(self) -> str:
+        # P3: apply exactly the YAML the gate validated, with no LLM in between; the agent only verifies
+        before = deployment_generations()
+        applied = ApplyManifestTool()._run(self.state.coding_output)
         ops = self._agent(
             role="Ops / Execution Agent",
-            goal="Apply validated YAML to the cluster",
-            backstory="You apply manifests and verify the result. Use apply_manifest, then verify with kubectl_read.",
-            tools=[ApplyManifestTool(), KubectlReadTool()],
+            goal="Verify that the applied manifests produced the intended cluster state",
+            backstory="The system has applied the validated manifests. Verify the result with kubectl_read and report it.",
+            tools=[KubectlReadTool()],
         )
         result = self._run_crew(
             agent=ops,
-            description=f"Apply this YAML to the cluster and verify:\n\n{self.state.coding_output}",
+            description=f"These manifests were applied:\n\n{self.state.coding_output}\n\n{applied}\n\nVerify the resulting cluster state and report it.",
             expected="Apply result with verification summary",
             scope="/project/mlops/ops",
         )
+        result = with_observed_state(before, result)
         self.state.final_response = result
         return result
 
@@ -327,12 +358,14 @@ class MlOpsFlow(Flow[AppState]):
             ),
             tools=[KubectlReadTool(), KubectlWriteTool(), ModelVersionTool(), InferenceClientTool()],
         )
+        before = deployment_generations()
         result = self._run_crew(
             agent=ops,
             description=f"Handle this cluster operation: {self.state.user_input}",
             expected="Clear summary of the operation result",
             scope="/project/mlops/ops",
         )
+        result = with_observed_state(before, result)
         self.state.final_response = result
         return result
 
@@ -384,12 +417,14 @@ class MlOpsFlow(Flow[AppState]):
             ),
             tools=[KubectlReadTool(), KubectlWriteTool()],
         )
+        before = deployment_generations()
         result = self._run_crew(
             agent=ingress,
             description=f"Handle this networking request: {self.state.user_input}",
             expected="Networking action result and status",
             scope="/project/mlops/ingress",
         )
+        result = with_observed_state(before, result)
         self.state.final_response = result
         return result
 
