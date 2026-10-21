@@ -25,6 +25,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -107,7 +108,7 @@ def load_tasks(path: str = "eval/tasks.yaml") -> list[dict]:
 
 def setup_preconditions(task: dict, log_path: Path | None) -> None:
     for cmd in task.get("setup_commands", []):
-        result = run_cmd(cmd, timeout=30)
+        result = run_cmd(cmd, timeout=90)  # traffic setups wait on predictions that take seconds each
         if "error" in result.lower() and "not found" not in result.lower():
             msg = f"[setup warning] {task['id']}: {cmd} -> {result}\n"
             if log_path:
@@ -133,6 +134,14 @@ def cleanup_eval_resources() -> None:
             if any(name.startswith(p) for p in keep_prefixes):
                 continue
             run_cmd(f"kubectl delete {kind} {name} -n default --ignore-not-found --wait=false", timeout=15)
+    # Bare pods (e.g. an agent's `kubectl run redis`) have no owner, so deleting deployments never removes them
+    try:
+        pods = json.loads(run_cmd("kubectl get pods -n default -o json", timeout=10))["items"]
+    except (ValueError, KeyError):
+        pods = []  # kubectl failed: delete nothing
+    for pod in pods:
+        if not pod["metadata"].get("ownerReferences"):
+            run_cmd(f"kubectl delete pod {pod['metadata']['name']} -n default --ignore-not-found --wait=false", timeout=15)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +151,12 @@ def cleanup_eval_resources() -> None:
 def check_response_keywords(response: str, keywords: list[str]) -> bool:
     lower = response.lower()
     return any(kw.lower() in lower for kw in keywords)
+
+
+def response_numbers(response: str) -> list[float]:
+    """Standalone numbers in the response (not parts of IPs, pod hashes or "P95"); ms are converted to s."""
+    found = re.findall(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(ms|milliseconds|s|secs?|seconds)?\b", response, re.IGNORECASE)
+    return [float(n) / (1000 if unit.lower().startswith("m") else 1) for n, unit in found]
 
 
 def check_cluster_state(cluster_check: dict | None, response: str = "") -> dict | None:
@@ -155,6 +170,16 @@ def check_cluster_state(cluster_check: dict | None, response: str = "") -> dict 
         # Catches hallucination: agent must repeat the real value, not invent one.
         passed = bool(actual_norm) and actual_norm.lower() in response.lower()
         return {"passed": passed, "expected": f"(in response) {actual_norm}", "actual": actual_norm}
+    if "tolerance" in cluster_check:
+        # Numeric ground truth (e.g. a Prometheus value): the answer must report it within the relative
+        # tolerance. Refusals and "no data" answers contain no such number.
+        try:
+            truth = float(actual_norm)
+        except ValueError:
+            truth = float("nan")
+        tol = cluster_check["tolerance"]
+        passed = any(abs(x - truth) <= tol * truth for x in response_numbers(response))
+        return {"passed": passed, "expected": f"(in response ±{tol:.0%}) {actual_norm}", "actual": actual_norm}
     expected = cluster_check["expected"]
     passed = expected.lower() in actual.lower() if expected else actual_norm == ""
     return {"passed": passed, "expected": expected, "actual": actual_norm}

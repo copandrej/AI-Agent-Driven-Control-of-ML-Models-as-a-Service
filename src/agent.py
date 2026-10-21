@@ -66,7 +66,19 @@ class ReActLLM(LLM):
         if isinstance(messages, list):
             messages = [{**m, "role": "user"} if i and m.get("role") == "system" else m
                         for i, m in enumerate(messages)]
+            messages = [part for m in messages for part in _split_observation(m)]
         return super().call(messages, *args, **kwargs)
+
+
+def _split_observation(message: dict) -> list[dict]:
+    """CrewAI appends tool results to the assistant turn ("step\\nObservation: result"). Qwen then writes
+    its next step inside <think>, the stop word cuts it off and the answer comes back empty, so the
+    result is sent as a user turn instead, as native tool calling does."""
+    content = message.get("content")
+    if message.get("role") != "assistant" or not isinstance(content, str) or "\nObservation:" not in content:
+        return [message]
+    step, result = content.split("\nObservation:", 1)
+    return [{**message, "content": step}, {"role": "user", "content": "Observation:" + result}]
 
 
 def resolve_llm() -> LLM:

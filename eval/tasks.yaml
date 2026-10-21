@@ -140,8 +140,10 @@ tasks:
     prompt: "Deploy the ML inference service using the manifest at k8s/ml_service/deployment.yaml"
     success_criteria:
       response_keywords: ["ml-service", "deploy", "applied", "created", "running"]
-      cluster_check:
-        command: "kubectl get deployment ml-service -o jsonpath='{.status.availableReplicas}'"
+      cluster_check:  # wait for the rollout like the update tasks, so a slow model load is not a failure
+        command: >-
+          kubectl rollout status deployment/ml-service --timeout=45s >/dev/null 2>&1;
+          kubectl get deployment ml-service -o jsonpath='{.status.availableReplicas}'
         expected: "1"
     setup_commands:
       - "kubectl delete deployment ml-service --ignore-not-found"
@@ -169,10 +171,13 @@ tasks:
     prompt: "POST a prediction request to http://localhost:30081/predict with an empty JSON payload {}"
     success_criteria:
       response_keywords: ["prediction", "confidence", "predict", "class"]
-      cluster_check: null
+      cluster_check:  # the fresh pod must have served a prediction (a refusal sends nothing)
+        command: "curl -s -m 10 http://localhost:30081/metrics | grep -q '^ml_requests_total{' && echo served"
+        expected: "served"
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "sleep 10"
+      - "kubectl rollout restart deployment/ml-service"  # fresh pod -> no requests counted yet
+      - "kubectl rollout status deployment/ml-service --timeout=60s"
     cleanup_commands: []
 
   - id: L2-04
@@ -189,7 +194,7 @@ tasks:
         expected: "resnet50"
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "kubectl rollout status deployment/ml-service --timeout=25s"
+      - "kubectl rollout status deployment/ml-service --timeout=60s"
     cleanup_commands:
       - "kubectl set env deployment/ml-service MODEL_NAME- MODEL_VERSION-"
       - "kubectl set image deployment/ml-service ml-service=copandrej/ml-service:v1"
@@ -201,10 +206,17 @@ tasks:
     prompt: "Query Prometheus for the total number of ML inference requests using ml_requests_total"
     success_criteria:
       response_keywords: ["ml_requests_total", "metric", "request", "prometheus"]
-      cluster_check: null
+      cluster_check:  # the total Prometheus reports must appear in the answer
+        command: >-
+          curl -s -m 10 "${PROMETHEUS_URL:-http://localhost:30090}/api/v1/query"
+          --data-urlencode 'query=sum(ml_requests_total)' |
+          python3 -c "import json,sys; print(json.load(sys.stdin)['data']['result'][0]['value'][1])"
+        tolerance: 0
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "sleep 8"
+      - "kubectl rollout status deployment/ml-service --timeout=60s"
+      - "for i in $(seq 12); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
+      - "sleep 25"  # longer than the 15s scrape interval, so Prometheus has the requests
     cleanup_commands: []
 
   - id: L2-06
@@ -214,10 +226,19 @@ tasks:
     prompt: "What is the P95 inference latency of the ML service?"
     success_criteria:
       response_keywords: ["latency", "p95", "percentile", "seconds", "histogram"]
-      cluster_check: null
+      cluster_check:  # the P95 Prometheus computes must appear in the answer (±25%, ms or s)
+        command: >-
+          curl -s -m 10 "${PROMETHEUS_URL:-http://localhost:30090}/api/v1/query"
+          --data-urlencode 'query=histogram_quantile(0.95, sum(rate(ml_request_latency_seconds_bucket[5m])) by (le))' |
+          python3 -c "import json,sys; print(json.load(sys.stdin)['data']['result'][0]['value'][1])"
+        tolerance: 0.25
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "sleep 8"
+      - "kubectl rollout status deployment/ml-service --timeout=60s"
+      - "for i in $(seq 3); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
+      - "sleep 20"  # rate() needs the counters to grow between two scrapes (15s interval)
+      - "for i in $(seq 3); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
+      - "sleep 25"
     cleanup_commands: []
 
   - id: L2-07
@@ -250,7 +271,7 @@ tasks:
         in_response: true
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "kubectl rollout status deployment/ml-service --timeout=25s"
+      - "kubectl rollout status deployment/ml-service --timeout=60s"
     cleanup_commands: []
 
   - id: L2-09
@@ -281,7 +302,7 @@ tasks:
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
       - "kubectl set image deployment/ml-service ml-service=copandrej/ml-service:v2"
-      - "kubectl rollout status deployment/ml-service --timeout=25s"
+      - "kubectl rollout status deployment/ml-service --timeout=60s"
     cleanup_commands:
       - "kubectl set env deployment/ml-service MODEL_NAME- MODEL_VERSION-"
       - "kubectl set image deployment/ml-service ml-service=copandrej/ml-service:v1"
