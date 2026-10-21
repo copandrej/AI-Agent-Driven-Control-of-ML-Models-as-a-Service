@@ -45,7 +45,7 @@ for _name in ["crewai", "litellm", "httpx", "openai", "chromadb", "httpcore", "u
     _log.propagate = False
 
 from src.agent import MlOpsFlow, resolve_llm, run_cmd
-from eval.task_trace import TraceRecorder, snapshot, state_diff
+from eval.task_trace import TraceRecorder, fault_facts, snapshot, state_diff
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -346,6 +346,7 @@ def run_single_task(
         record["route"] = result["route"]
     record["trace"] = trace.steps
     record["diff"] = diff
+    record.update(fault_facts(trace.steps))
     return record
 
 

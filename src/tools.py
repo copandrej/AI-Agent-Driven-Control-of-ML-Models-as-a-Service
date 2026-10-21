@@ -261,7 +261,7 @@ class ModelVersionTool(BaseTool):
             f"{deployment}={new_image} -n {namespace}"
         )
         rollout = run_cmd(
-            f"kubectl rollout status deployment/{deployment} -n {namespace} --timeout=60s"
+            f"kubectl rollout status deployment/{deployment} -n {namespace} --timeout=60s", timeout=70
         )
         verify = run_cmd(
             f"kubectl get deployment {deployment} -n {namespace} "

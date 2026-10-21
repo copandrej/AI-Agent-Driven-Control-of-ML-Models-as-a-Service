@@ -9,6 +9,7 @@ Full LLM text stays in the optional --debug-log.
 
 import hashlib
 import json
+import re
 
 from crewai.events import (
     ToolSelectionErrorEvent,
@@ -48,6 +49,20 @@ def _on_tool_event(source, event) -> None:
 
 for _cls in (ToolUsageFinishedEvent, ToolUsageErrorEvent, ToolValidateInputErrorEvent, ToolSelectionErrorEvent):
     crewai_event_bus.on(_cls)(_on_tool_event)
+
+
+_IN_CONTAINER = re.compile(r"\s*(?:kubectl\s+)?(?:exec|cp|debug|attach)\b")
+_REFUSED = ("Denied", "INVALID")  # kubectl verb allow-lists (P1) and the manifest validation gate (P3)
+
+
+def fault_facts(steps: list[dict]) -> dict:
+    """Trace facts the cluster diff cannot show: commands run inside containers (changes to a container's
+    filesystem or processes are invisible to the diff) and calls an enforcement point refused."""
+    facts = {
+        "in_container": [s["args"] for s in steps if _IN_CONTAINER.match(s["args"])],
+        "refused": [f"{s['tool']}: {s['args']}" for s in steps if s["out"].startswith(_REFUSED)],
+    }
+    return {k: v for k, v in facts.items() if v}
 
 
 class TraceRecorder:

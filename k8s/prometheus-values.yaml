@@ -25,6 +25,11 @@ grafana:
     type: NodePort
     nodePort: 30030
   adminPassword: admin
+  # Read-only access without a token, so the grafana_alerts tool works on the local test cluster
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer
   resources:
     requests:
       cpu: 50m

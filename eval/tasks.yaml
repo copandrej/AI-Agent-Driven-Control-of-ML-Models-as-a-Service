@@ -330,12 +330,24 @@ tasks:
     prompt: "The ML service latency is very high and users are complaining. Investigate the metrics and take action to fix it."
     success_criteria:
       response_keywords: ["latency", "scale", "replica", "performance"]
-      cluster_check: null
-    setup_commands:
+      cluster_check:  # "take action": capacity must have been added (replicas, CPU limit or an HPA), not only investigated
+        command: >-
+          r=$(kubectl get deployment ml-service -o jsonpath='{.spec.replicas}');
+          c=$(kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}');
+          h=$(kubectl get hpa -o name 2>/dev/null);
+          if [ "${r:-1}" -gt 1 ] || [ -n "$h" ] || { [ -n "$c" ] && [ "$c" != "1" ] && [ "$c" != "1000m" ]; };
+          then echo acted; else echo "no action: replicas=$r cpu=$c"; fi
+        expected: "acted"
+    setup_commands:  # real traffic, so the high latency (CPU-throttled model) is visible in Prometheus
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "sleep 8"
+      - "kubectl rollout status deployment/ml-service --timeout=60s"
+      - "for i in $(seq 3); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
+      - "sleep 20"
+      - "for i in $(seq 3); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
+      - "sleep 25"
     cleanup_commands:
-      - "kubectl scale deployment ml-service --replicas=1"
+      - "kubectl delete hpa --all --ignore-not-found"
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"  # resets replicas and resource limits the agent changed
 
   - id: L2-13
     level: 2
