@@ -17,6 +17,7 @@ Usage:
 
 Output:
     Results → eval/results/results_{arch}_{model}_{levels}_{timestamp}.json
+    Calls   → eval/results/calls_{arch}_{model}_{levels}_{timestamp}.jsonl  (one line per LLM call)
     Debug   → eval/results/logs/debug_{arch}_{model}_{levels}_{timestamp}.log
 """
 
@@ -45,6 +46,7 @@ for _name in ["crewai", "litellm", "httpx", "openai", "chromadb", "httpcore", "u
     _log.propagate = False
 
 from src.agent import MlOpsFlow, resolve_llm, run_cmd
+from eval import telemetry
 from eval.task_trace import TraceRecorder, fault_facts, snapshot, state_diff
 
 # ---------------------------------------------------------------------------
@@ -308,8 +310,14 @@ def run_single_task(
     setup_preconditions(task, log_path)
 
     before = snapshot()
+    counters = telemetry.vllm_counters()
+    telemetry.set_task(task_id)
+    started_at = datetime.now(timezone.utc).isoformat()
     with TraceRecorder() as trace:
         result = _RUNNERS[architecture](llm, task["prompt"], log_path)
+    finished_at = datetime.now(timezone.utc).isoformat()
+    telemetry.set_task(None)
+    vllm = telemetry.counter_delta(counters, telemetry.vllm_counters())
     diff = state_diff(before, snapshot())
 
     criteria = task["success_criteria"]
@@ -334,6 +342,11 @@ def run_single_task(
         "description": description,
         "success": success,
         "elapsed_seconds": result["elapsed"],
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "stop": ("error" if result["response"].startswith("Error:")
+                 else "empty" if result["response"].startswith("[Agent produced empty response") else "answer"),
+        "vllm": vllm,
         "response": result["response"][:2000],
     }
     # Only emit cluster_check when it was actually run (non-null) — it is the ground-truth
@@ -425,10 +438,17 @@ def run_evaluation(
     cleanup_eval_resources()
     print()
 
+    calls_path = output_path.with_name(output_path.name.replace("results_", "calls_", 1)).with_suffix(".jsonl")
+    telemetry.start(calls_path)
+
     # Build the metadata block once — reused on every incremental write
     metadata = {
         "architecture": architecture,
         "llm_model": llm.model,
+        **telemetry.server_info(),
+        "temperature": llm.temperature,
+        "git_commit": run_cmd(["git", "rev-parse", "--short", "HEAD"]),
+        "calls_file": calls_path.name,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tasks_file": tasks_path,
         "levels": levels or [1, 2],

@@ -36,14 +36,16 @@ def _short(value) -> str:
 def _on_tool_event(source, event) -> None:
     if _events is None:
         return
-    out = event.output if isinstance(event, ToolUsageFinishedEvent) else event.error
+    finished = isinstance(event, ToolUsageFinishedEvent)
+    out = event.output if finished else event.error
     out = str(out).split("\nYou ONLY have access to the following tools")[0]  # crewai's periodic reminder
     _events.append((event.timestamp, {
         "agent": event.agent_role,
         "tool": event.tool_name,
         "args": _short(event.tool_args),
         "out": _short(out),
-        **({} if isinstance(event, ToolUsageFinishedEvent) else {"event": event.type}),
+        **({"duration_s": round((event.finished_at - event.started_at).total_seconds(), 3)} if finished
+           else {"event": event.type}),
     }))
 
 
