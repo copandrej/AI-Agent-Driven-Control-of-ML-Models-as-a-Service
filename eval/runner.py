@@ -17,7 +17,8 @@ Usage:
 
 Output:
     Results → eval/results/results_{arch}_{model}_{levels}_{timestamp}.json
-    Calls   → eval/results/calls_{arch}_{model}_{levels}_{timestamp}.jsonl  (one line per LLM call)
+    Calls   → eval/results/calls_{arch}_{model}_{levels}_{timestamp}.jsonl  (one line per LLM call;
+              --full-calls adds reasoning text and input messages)
     Debug   → eval/results/logs/debug_{arch}_{model}_{levels}_{timestamp}.log
 """
 
@@ -423,6 +424,7 @@ def run_evaluation(
     tasks_path: str = "eval/tasks.yaml",
     output_path: Path | None = None,
     log_path: Path | None = None,
+    full_calls: bool = False,
 ) -> dict:
     tasks = load_tasks(tasks_path)
     if levels:
@@ -439,7 +441,7 @@ def run_evaluation(
     print()
 
     calls_path = output_path.with_name(output_path.name.replace("results_", "calls_", 1)).with_suffix(".jsonl")
-    telemetry.start(calls_path)
+    telemetry.start(calls_path, full=full_calls)
 
     # Build the metadata block once — reused on every incremental write
     metadata = {
@@ -549,6 +551,11 @@ Quick commands for ablation study:
         help="Write verbose agent output to eval/results/logs/ for debugging",
     )
     parser.add_argument(
+        "--full-calls",
+        action="store_true",
+        help="Also store reasoning text and input messages per LLM call in the calls JSONL (larger files)",
+    )
+    parser.add_argument(
         "--tasks",
         default="eval/tasks.yaml",
         help="Path to task definitions YAML (default: eval/tasks.yaml)",
@@ -567,6 +574,7 @@ Quick commands for ablation study:
             tasks_path=args.tasks,
             output_path=result_path,
             log_path=log_path,
+            full_calls=args.full_calls,
         )
         all_outputs[arch] = output
 

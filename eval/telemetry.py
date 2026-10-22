@@ -6,10 +6,13 @@ One JSONL line per LLM call, for every architecture that goes through litellm:
   - usage (prompt / completion / reasoning tokens), vLLM request id, finish reason
   - the answer text (the ReAct step) and logprob summaries of reasoning, answer and the Action part
   - each agent's system prompt (role, tools, rules) once per file
-Reasoning text and full prompts are not stored (size); use --debug-log for those.
+With full=True (runner --full-calls) each line also has the reasoning text and the input messages that are
+new since the same agent's previous call in the task ("messages_from" = index of the first one), so the
+exact prompt of every call can be rebuilt by concatenation without storing the whole context each time.
 Per-task vLLM counter deltas (tokens, prefix cache, preemptions) come from the server's /metrics.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -25,16 +28,19 @@ _COUNTERS = ("prompt_tokens_total", "generation_tokens_total", "prefix_cache_hit
              "prefix_cache_queries_total", "num_preemptions_total")
 
 _path: Path | None = None
+_full = False
 _task: str | None = None
 _seen_prompts: set[str] = set()
+_sent: dict[tuple, tuple[int, str]] = {}  # (task, agent) -> (messages already stored, hash of them)
 _completion = litellm.completion
 
 
-def start(path: Path) -> None:
+def start(path: Path, full: bool = False) -> None:
     """Route LLM calls through the recorder and write them to path (one file per architecture run)."""
-    global _path
-    _path = path
+    global _path, _full
+    _path, _full = path, full
     _seen_prompts.clear()
+    _sent.clear()
     litellm.completion = _recorded_completion
 
 
@@ -69,6 +75,20 @@ def _logprob_summaries(tokens: list, n_reasoning: int) -> dict:
     return result
 
 
+def _hash(messages: list) -> str:
+    return hashlib.sha1(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _new_messages(role: str | None, messages: list) -> dict:
+    """Messages added since this agent's previous call in the task; all of them if earlier ones changed."""
+    key = (_task, role)
+    n, digest = _sent.get(key, (0, ""))
+    if n > len(messages) or _hash(messages[:n]) != digest:
+        n = 0
+    _sent[key] = (len(messages), _hash(messages))
+    return {"messages_from": n, "messages": messages[n:]}
+
+
 def _recorded_completion(*args, **kwargs):
     if _path is None:
         return _completion(*args, **kwargs)
@@ -82,6 +102,8 @@ def _recorded_completion(*args, **kwargs):
         _write({"type": "prompt", "agent": role, "text": system})
 
     record = {"type": "call", "task": _task, "agent": role, "start": datetime.now(timezone.utc).isoformat()}
+    if _full:
+        record.update(_new_messages(role, messages))
     t0 = time.monotonic()
     try:
         response = _completion(*args, **kwargs)
@@ -108,6 +130,7 @@ def _recorded_completion(*args, **kwargs):
         "reasoning_tokens": n_reasoning,
         "content": content,
         "logprobs": _logprob_summaries(tokens, n_reasoning),
+        **({"reasoning": getattr(choice.message, "reasoning_content", None)} if _full else {}),
     })
     return response
 
