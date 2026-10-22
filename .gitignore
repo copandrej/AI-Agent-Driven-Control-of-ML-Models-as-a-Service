@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Eval outputs (results, traces, figures, generated reports): never commit unless explicitly asked
+eval/results/
+eval/archive/
+# Plotting scripts (temporary, local only)
+eval/plot_*.py

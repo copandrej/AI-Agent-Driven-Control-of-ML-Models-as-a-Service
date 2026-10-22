@@ -352,11 +352,12 @@ class MlOpsFlow(Flow[AppState]):
                 "ML service NodePort 30081: GET http://localhost:30081/health, "
                 "POST http://localhost:30081/predict (empty payload {} uses random input), "
                 "GET http://localhost:30081/metrics.\n"
+                "- prometheus_query: PromQL over time, e.g. histogram_quantile(0.95, rate(ml_request_latency_seconds_bucket[5m])).\n"
                 "Never skip tool calls. If asked to check health, call inference_client. "
                 "If asked to switch model version, call model_version_update. "
                 "If asked about pod status, call kubectl_read."
             ),
-            tools=[KubectlReadTool(), KubectlWriteTool(), ModelVersionTool(), InferenceClientTool()],
+            tools=[KubectlReadTool(), KubectlWriteTool(), ModelVersionTool(), InferenceClientTool(), PrometheusQueryTool()],
         )
         before = deployment_generations()
         result = self._run_crew(
