@@ -103,7 +103,7 @@ def _fingerprint(item: dict) -> dict:
 
 
 def snapshot() -> dict[str, dict]:
-    raw = run_cmd(["kubectl", "get", "deploy,svc,cm,ingress,pod", "-A", "-o", "json"], timeout=30)
+    raw = run_cmd(["kubectl", "get", "deploy,svc,cm,ingress,pod,servicemonitor,hpa", "-A", "-o", "json"], timeout=30)
     try:
         items = json.loads(raw)["items"]
     except (ValueError, KeyError):

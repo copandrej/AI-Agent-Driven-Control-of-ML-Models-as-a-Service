@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -122,6 +123,23 @@ def setup_preconditions(task: dict, log_path: Path | None) -> None:
 def cleanup_task(task: dict) -> None:
     for cmd in task.get("cleanup_commands", []):
         run_cmd(cmd, timeout=30)
+
+
+# Infrastructure no task should change; re-applied after each task if an agent changed it
+BASELINE_MANIFESTS = ["k8s/ml_service/servicemonitor.yaml"]
+
+
+def restore_baseline() -> list[str]:
+    restored = []
+    for path in BASELINE_MANIFESTS:
+        try:
+            drifted = subprocess.run(["kubectl", "diff", "-f", path], capture_output=True, timeout=30).returncode == 1
+        except subprocess.TimeoutExpired:
+            drifted = True
+        if drifted:
+            run_cmd(["kubectl", "apply", "-f", path], timeout=30)
+            restored.append(path)
+    return restored
 
 
 def cleanup_eval_resources() -> None:
@@ -335,6 +353,9 @@ def run_single_task(
     print_task_done(idx, total, task_id, description, success, result["elapsed"])
 
     cleanup_task(task)
+    restored = restore_baseline()
+    if restored:
+        print(f"  [baseline drift] {task_id} changed {', '.join(restored)} -> restored")
 
     record = {
         "task_id": task_id,
@@ -362,6 +383,8 @@ def run_single_task(
         record["route"] = result["route"]
     record["trace"] = trace.steps
     record["diff"] = diff
+    if restored:
+        record["baseline_restored"] = restored
     record.update(fault_facts(trace.steps))
     return record
 
@@ -425,10 +448,13 @@ def run_evaluation(
     output_path: Path | None = None,
     log_path: Path | None = None,
     full_calls: bool = False,
+    task_ids: list[str] | None = None,
 ) -> dict:
     tasks = load_tasks(tasks_path)
     if levels:
         tasks = [t for t in tasks if t["level"] in levels]
+    if task_ids:
+        tasks = [t for t in tasks if t["id"] in task_ids]
 
     levels_str = " ".join(f"L{l}" for l in sorted(levels)) if levels else "L1 L2"
     print(f"\n{'='*70}")
@@ -438,6 +464,8 @@ def run_evaluation(
     print(f"{'='*70}")
     print("  Cleaning up leftover eval resources...")
     cleanup_eval_resources()
+    for path in restore_baseline():
+        print(f"  [baseline drift] {path} differed from the cluster before the run -> restored")
     print()
 
     calls_path = output_path.with_name(output_path.name.replace("results_", "calls_", 1)).with_suffix(".jsonl")
@@ -454,6 +482,7 @@ def run_evaluation(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tasks_file": tasks_path,
         "levels": levels or [1, 2],
+        "task_ids": task_ids,
         "log_file": str(log_path) if log_path else None,
         "status": "in_progress",
     }
@@ -560,6 +589,13 @@ Quick commands for ablation study:
         default="eval/tasks.yaml",
         help="Path to task definitions YAML (default: eval/tasks.yaml)",
     )
+    parser.add_argument(
+        "--task-ids",
+        nargs="+",
+        default=None,
+        metavar="ID",
+        help="Run only these task ids, e.g. L2-05 L2-06 (default: all)",
+    )
     args = parser.parse_args()
 
     llm = resolve_llm()
@@ -575,6 +611,7 @@ Quick commands for ablation study:
             output_path=result_path,
             log_path=log_path,
             full_calls=args.full_calls,
+            task_ids=args.task_ids,
         )
         all_outputs[arch] = output
 
