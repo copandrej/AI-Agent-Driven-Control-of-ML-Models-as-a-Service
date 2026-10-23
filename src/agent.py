@@ -113,6 +113,12 @@ def resolve_llm() -> LLM:
     return cls(model=model)
 
 
+def without_thinking(llm: LLM) -> LLM:
+    """Copy of llm with Qwen thinking off (the router misroutes more with thinking)."""
+    extra_body = {**llm.additional_params.get("extra_body", {}), "chat_template_kwargs": {"enable_thinking": False}}
+    return type(llm)(model=llm.model, temperature=llm.temperature, timeout=llm.timeout, extra_body=extra_body)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
@@ -133,7 +139,7 @@ def clean_response(raw: str) -> str:
 
     # Catch degenerate responses (just backticks, whitespace, etc.)
     if not result or re.fullmatch(r"[`\s]*", result):
-        return "[Agent produced empty response — the model likely exhausted its output on internal reasoning. Try rephrasing the request.]"
+        return "[Agent produced empty response — no answer text, only a Thought/Action step.]"
     return result
 
 
@@ -200,10 +206,10 @@ class MlOpsFlow(Flow[AppState]):
         self.llm = llm
         self.memory = memory
 
-    def _agent(self, role: str, goal: str, backstory: str, tools: list) -> Agent:
+    def _agent(self, role: str, goal: str, backstory: str, tools: list, llm: LLM | None = None) -> Agent:
         return Agent(
             role=role, goal=goal, backstory=backstory,
-            llm=self.llm, tools=tools, verbose=VERBOSE, max_iter=25,
+            llm=llm or self.llm, tools=tools, verbose=VERBOSE, max_iter=25,
             cache=False,  # tools read live cluster state; a cached result would be stale
         )
 
@@ -256,6 +262,7 @@ class MlOpsFlow(Flow[AppState]):
                 "IMPORTANT: Use kubectl_read to check current cluster state if you need context before classifying."
             ),
             tools=[KubectlReadTool()],
+            llm=without_thinking(self.llm),
         )
         result = self._run_crew(
             agent=orchestrator,
