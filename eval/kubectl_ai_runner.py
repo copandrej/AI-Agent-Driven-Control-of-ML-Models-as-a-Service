@@ -70,7 +70,9 @@ def run_kubectl_ai_task(prompt: str, model: str, provider: str, log_path: Path |
 
     start = time.time()
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        # whole task; multi-step tasks on larger models take far longer than 180 s
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=int(os.getenv("KUBECTL_AI_TIMEOUT", "1800")))
         raw = (result.stdout + result.stderr).strip()
         response = _ANSI.sub("", raw) or "(no output)"
         if log_path:

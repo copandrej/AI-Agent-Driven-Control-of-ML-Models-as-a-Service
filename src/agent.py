@@ -108,7 +108,8 @@ def resolve_llm() -> LLM:
 
     cls = ReActLLM if FORCE_REACT else LLM
     if provider in ("ollama", "openai_compat"):
-        return cls(model=model, temperature=temperature, timeout=180,
+        # per LLM call; larger models with thinking on can exceed 180 s on long contexts
+        return cls(model=model, temperature=temperature, timeout=int(os.getenv("LLM_TIMEOUT", "600")),
                    extra_body={"options": {"num_ctx": 65536}})
     return cls(model=model)
 
