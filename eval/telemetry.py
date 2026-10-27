@@ -6,6 +6,8 @@ One JSONL line per LLM call, for every architecture that goes through litellm:
   - usage (prompt / completion / reasoning tokens), vLLM request id, finish reason
   - the answer text (the ReAct step) and logprob summaries of reasoning, answer and the Action part
   - each agent's system prompt (role, tools, rules) once per file
+  - context window use per task (context_stats): an overflow is a call the server rejects; crewai then summarizes
+    the conversation (recorded as agent "Context Summarizer", via acompletion) and the agent continues
 With full=True (runner --full-calls) each line also has the reasoning text and the input messages that are
 new since the same agent's previous call in the task ("messages_from" = index of the first one), so the
 exact prompt of every call can be rebuilt by concatenation without storing the whole context each time.
@@ -33,6 +35,9 @@ _task: str | None = None
 _seen_prompts: set[str] = set()
 _sent: dict[tuple, tuple[int, str]] = {}  # (task, agent) -> (messages already stored, hash of them)
 _completion = litellm.completion
+_acompletion = litellm.acompletion
+_SUMMARIZER = "structured summaries of agent conversations"  # crewai's summarizer system prompt
+_ctx: dict = {}  # per task: context window use (see context_stats)
 
 
 def start(path: Path, full: bool = False) -> None:
@@ -42,11 +47,20 @@ def start(path: Path, full: bool = False) -> None:
     _seen_prompts.clear()
     _sent.clear()
     litellm.completion = _recorded_completion
+    litellm.acompletion = _recorded_acompletion
 
 
 def set_task(task_id: str | None) -> None:
     global _task
     _task = task_id
+    if task_id is not None:
+        _ctx.update(max_prompt_tokens={}, overflows={}, summary_calls=0)
+
+
+def context_stats() -> dict:
+    """Context window use in the current task: the largest prompt per agent, the calls rejected for exceeding the
+    window per agent, and crewai's summary calls (it compacts the conversation on overflow and continues)."""
+    return {k: (dict(v) if isinstance(v, dict) else v) for k, v in _ctx.items()}
 
 
 def _write(record: dict) -> None:
@@ -89,29 +103,32 @@ def _new_messages(role: str | None, messages: list) -> dict:
     return {"messages_from": n, "messages": messages[n:]}
 
 
-def _recorded_completion(*args, **kwargs):
-    if _path is None:
-        return _completion(*args, **kwargs)
+def _begin(kwargs: dict) -> dict:
     if kwargs.get("logprobs") is None:  # crewai passes logprobs=None by default
         kwargs["logprobs"] = True
     messages = kwargs.get("messages") or []
     system = messages[0].get("content", "") if messages and messages[0].get("role") == "system" else ""
     role = m.group(1) if (m := _ROLE.match(system)) else None
+    if _SUMMARIZER in system:  # crewai compacting a conversation that overflowed the context window
+        role = "Context Summarizer"
+        _ctx["summary_calls"] += 1
     if system and role not in _seen_prompts:
         _seen_prompts.add(role)
         _write({"type": "prompt", "agent": role, "text": system})
-
     record = {"type": "call", "task": _task, "agent": role, "start": datetime.now(timezone.utc).isoformat()}
     if _full:
         record.update(_new_messages(role, messages))
-    t0 = time.monotonic()
-    try:
-        response = _completion(*args, **kwargs)
-    except Exception as e:
-        _write({**record, "duration_s": round(time.monotonic() - t0, 3), "error": type(e).__name__})
-        raise
-    record["duration_s"] = round(time.monotonic() - t0, 3)
+    return record
 
+
+def _failed(record: dict, t0: float, e: Exception) -> None:
+    if type(e).__name__ == "ContextWindowExceededError":
+        _ctx["overflows"][record["agent"]] = _ctx["overflows"].get(record["agent"], 0) + 1
+    _write({**record, "duration_s": round(time.monotonic() - t0, 3), "error": type(e).__name__})
+
+
+def _finish(record: dict, t0: float, response) -> None:
+    record["duration_s"] = round(time.monotonic() - t0, 3)
     usage = response.usage
     details = getattr(usage, "completion_tokens_details", None)
     n_reasoning = getattr(details, "reasoning_tokens", None) or 0
@@ -120,6 +137,8 @@ def _recorded_completion(*args, **kwargs):
     headers = (getattr(response, "_hidden_params", {}) or {}).get("additional_headers") or {}
     logprobs = getattr(choice, "logprobs", None)
     tokens = getattr(logprobs, "content", None) or []
+    peak = _ctx["max_prompt_tokens"]
+    peak[record["agent"]] = max(peak.get(record["agent"], 0), usage.prompt_tokens or 0)
     _write({
         **record,
         "server_date": headers.get("llm_provider-date"),
@@ -132,6 +151,32 @@ def _recorded_completion(*args, **kwargs):
         "logprobs": _logprob_summaries(tokens, n_reasoning),
         **({"reasoning": getattr(choice.message, "reasoning_content", None)} if _full else {}),
     })
+
+
+def _recorded_completion(*args, **kwargs):
+    if _path is None:
+        return _completion(*args, **kwargs)
+    record, t0 = _begin(kwargs), time.monotonic()
+    try:
+        response = _completion(*args, **kwargs)
+    except Exception as e:
+        _failed(record, t0, e)
+        raise
+    _finish(record, t0, response)
+    return response
+
+
+async def _recorded_acompletion(*args, **kwargs):
+    """Async calls: crewai summarizes the chunks of an overflowing conversation in parallel through acompletion."""
+    if _path is None:
+        return await _acompletion(*args, **kwargs)
+    record, t0 = _begin(kwargs), time.monotonic()
+    try:
+        response = await _acompletion(*args, **kwargs)
+    except Exception as e:
+        _failed(record, t0, e)
+        raise
+    _finish(record, t0, response)
     return response
 
 

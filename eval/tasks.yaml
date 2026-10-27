@@ -1,8 +1,9 @@
 # Evaluation Task Set
-# 25 tasks across 2 complexity levels
+# 28 tasks across 3 complexity levels (L3-03 only with TOOLSET=platform)
 #
 # Level 1: General Kubernetes operations
 # Level 2: ML inference service operations (thesis differentiator)
+# Level 3: ML serving incidents and model lifecycle (multi-fault, preservation checks)
 
 tasks:
 
@@ -219,8 +220,12 @@ tasks:
     setup_commands:
       - "kubectl apply -f k8s/ml_service/deployment.yaml"
       - "kubectl rollout status deployment/ml-service --timeout=60s"
-      - "for i in $(seq 12); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
-      - "sleep 25"  # longer than the 15s scrape interval, so Prometheus has the requests
+      # 3 requests only: the service serves one request at a time (5-8 s each), and longer load fails the 1 s liveness
+      # probe, which restarts the container and resets the counter
+      - "for i in $(seq 3); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
+      - >-  # wait until Prometheus has scraped the new pod's counter, then one more scrape so the total is final
+        for i in $(seq 36); do curl -s -m 5 "${PROMETHEUS_URL:-http://localhost:30090}/api/v1/query"
+        --data-urlencode 'query=sum(ml_requests_total)' | grep -q '"value"' && break; sleep 5; done; sleep 20
     cleanup_commands: []
 
   - id: L2-06
@@ -332,32 +337,6 @@ tasks:
     cleanup_commands:
       - "kubectl delete deployment eval-crasher --ignore-not-found"
 
-  - id: L2-12
-    level: 2
-    category: ml_specific
-    description: Investigate high latency and recommend action
-    prompt: "The ML service latency is very high and users are complaining. Investigate the metrics and take action to fix it."
-    success_criteria:
-      response_keywords: ["latency", "scale", "replica", "performance"]
-      cluster_check:  # "take action": capacity must have been added (replicas, CPU limit or an HPA), not only investigated
-        command: >-
-          r=$(kubectl get deployment ml-service -o jsonpath='{.spec.replicas}');
-          c=$(kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}');
-          h=$(kubectl get hpa -o name 2>/dev/null);
-          if [ "${r:-1}" -gt 1 ] || [ -n "$h" ] || { [ -n "$c" ] && [ "$c" != "1" ] && [ "$c" != "1000m" ]; };
-          then echo acted; else echo "no action: replicas=$r cpu=$c"; fi
-        expected: "acted"
-    setup_commands:  # real traffic, so the high latency (CPU-throttled model) is visible in Prometheus
-      - "kubectl apply -f k8s/ml_service/deployment.yaml"
-      - "kubectl rollout status deployment/ml-service --timeout=60s"
-      - "for i in $(seq 3); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
-      - "sleep 20"
-      - "for i in $(seq 3); do curl -sf -m 15 --retry 3 --retry-all-errors -o /dev/null -X POST -d '{}' http://localhost:30081/predict; done"
-      - "sleep 25"
-    cleanup_commands:
-      - "kubectl delete hpa --all --ignore-not-found"
-      - "kubectl apply -f k8s/ml_service/deployment.yaml"  # resets replicas and resource limits the agent changed
-
   - id: L2-13
     level: 2
     category: ml_specific
@@ -405,3 +384,120 @@ tasks:
       - "kubectl delete service ml-service --ignore-not-found"
       - "sleep 3"
     cleanup_commands: []
+
+  # ── Level 3: ML serving incidents and lifecycle (goal + preservation checks) ─
+  # The deployment's UID is recorded at setup in /tmp/eval-l3.uid (host side, not reachable through the agents'
+  # tools); every check also fails if ml-service was deleted and recreated. Checks print PASS or "FAIL: <reasons>".
+  # L3-03 needs TOOLSET=platform (training jobs and the registry tools).
+
+  - id: L3-01
+    level: 3
+    category: ml_incident
+    description: Two faults - wrong model version and throttled CPU
+    prompt: "Users report that the ML service returns predictions from the old mobilenet_v2 model and that responses have become much slower than before. The service must serve model version v2 (resnet50) again, without the slowdown. Fix the live service without deleting or recreating the ml-service deployment."
+    success_criteria:
+      response_keywords: ["v2", "cpu", "resnet50", "limit", "ml-service"]
+      cluster_check:  # both faults fixed, deployment identity kept
+        command: >-
+          kubectl rollout status deployment/ml-service --timeout=60s >/dev/null 2>&1; sleep 5; f="";
+          curl -s -m 10 --retry 3 --retry-all-errors http://localhost:30081/health | grep -q resnet50 || f="$f not serving resnet50;";
+          c=$(kubectl get deployment ml-service -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}');
+          m=$(python3 -c "import sys; v=sys.argv[1]; print(int(float(v[:-1])) if v.endswith('m') else int(float(v)*1000) if v else 99999)" "$c");
+          [ "$m" -ge 500 ] || f="$f cpu limit still $c;";
+          [ "$(kubectl get deployment ml-service -o jsonpath='{.metadata.uid}')" = "$(cat /tmp/eval-l3.uid)" ] || f="$f deployment was deleted and recreated;";
+          [ -z "$f" ] && echo PASS || echo "FAIL:$f"
+        expected: "PASS"
+        timeout: 90
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "kubectl set resources deployment/ml-service --requests=cpu=100m --limits=cpu=100m"
+      - "kubectl rollout status deployment/ml-service --timeout=80s"
+      - "kubectl get deployment ml-service -o jsonpath='{.metadata.uid}' > /tmp/eval-l3.uid"
+    cleanup_commands:
+      - "kubectl replace --force -f k8s/ml_service/deployment.yaml"
+
+  - id: L3-02
+    level: 3
+    category: ml_incident
+    description: Add a serving tier label without recreating the deployment (immutable selector)
+    prompt: "Label the ML service pods with tier=serving and make the ml-service Service route only to pods that have both app=ml-service and tier=serving. Keep the ml-service deployment (do not delete or recreate it) and keep the service reachable."
+    success_criteria:
+      response_keywords: ["tier", "serving", "selector", "label", "ml-service"]
+      cluster_check:  # label on the pod template, Service selector narrowed, still serving, identity kept
+        command: >-
+          kubectl rollout status deployment/ml-service --timeout=60s >/dev/null 2>&1; sleep 5; f="";
+          [ "$(kubectl get deployment ml-service -o jsonpath='{.spec.template.metadata.labels.tier}')" = serving ] || f="$f pod template lacks tier=serving;";
+          [ "$(kubectl get service ml-service -o jsonpath='{.spec.selector.tier}/{.spec.selector.app}')" = serving/ml-service ] || f="$f service selector is not app=ml-service,tier=serving;";
+          curl -s -m 10 --retry 3 --retry-all-errors http://localhost:30081/health | grep -q healthy || f="$f service not reachable;";
+          [ "$(kubectl get deployment ml-service -o jsonpath='{.metadata.uid}')" = "$(cat /tmp/eval-l3.uid)" ] || f="$f deployment was deleted and recreated;";
+          [ -z "$f" ] && echo PASS || echo "FAIL:$f"
+        expected: "PASS"
+        timeout: 90
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "kubectl rollout status deployment/ml-service --timeout=80s"
+      - "kubectl get deployment ml-service -o jsonpath='{.metadata.uid}' > /tmp/eval-l3.uid"
+    cleanup_commands:
+      - "kubectl replace --force -f k8s/ml_service/deployment.yaml"
+
+  - id: L3-03
+    level: 3
+    category: ml_lifecycle
+    description: Train a model version and register it with its accuracy (TOOLSET=platform)
+    toolset: platform  # needs the training and registry tools; skipped in other toolsets
+    prompt: "Train a new version of the mobilenet_v2 model on dataset imagenet-subset-2025-10 for 2 epochs, as a training job named train-mobilenet-v3. When the job has finished, register the result as version v3 of mobilenet_v2 (serving image copandrej/ml-service:v3) in the model registry, together with the validation accuracy the job reports. Do not promote it to production."
+    success_criteria:
+      response_keywords: ["v3", "accuracy", "registry", "train", "mobilenet_v2"]
+      cluster_check:  # job succeeded, registry entry carries the accuracy from the job log, not promoted
+        command: >-
+          f="";
+          [ "$(kubectl get job train-mobilenet-v3 -o jsonpath='{.status.succeeded}')" = 1 ] || f="$f training job did not succeed;";
+          acc=$(kubectl logs job/train-mobilenet-v3 2>/dev/null | sed -n 's/.*val_accuracy=\([0-9.]*\).*/\1/p');
+          e=$(kubectl get configmap model-registry -o jsonpath='{.data.mobilenet_v2\.v3}');
+          python3 -c "import json,sys; e=json.loads(sys.argv[1] or '{}'); a=float(sys.argv[2] or 'nan'); sys.exit(0 if abs(float(e.get('val_accuracy',-1))-a)<0.0015 and e.get('stage')!='production' else 1)" "$e" "$acc" || f="$f registry entry mobilenet_v2.v3 missing, wrong accuracy or promoted;";
+          [ -z "$f" ] && echo PASS || echo "FAIL:$f"
+        expected: "PASS"
+        timeout: 60
+    setup_commands:
+      - "kubectl delete job train-mobilenet-v3 --ignore-not-found"
+      - "kubectl delete configmap model-registry --ignore-not-found"
+      - >-
+        kubectl create configmap model-registry
+        --from-literal=mobilenet_v2.v1='{"image": "copandrej/ml-service:v1", "stage": "production", "val_accuracy": 0.712}'
+        --from-literal=resnet50.v2='{"image": "copandrej/ml-service:v2", "stage": "staging", "val_accuracy": 0.761}'
+    cleanup_commands:
+      - "kubectl delete job train-mobilenet-v3 --ignore-not-found"
+      - "kubectl delete configmap model-registry --ignore-not-found"
+
+  - id: L3-04
+    level: 3
+    category: ml_lifecycle
+    description: Roll back a bad promotion and update the model registry
+    prompt: "Model version v2 (resnet50) was promoted to production yesterday, but its p95 latency is far above our 1 s SLO. Roll the ML service back to the previously served version v1 (mobilenet_v2) and update the model registry (ConfigMap model-registry in the default namespace) so that v2 is archived and v1 is production again. Do not delete or recreate the deployment or the registry."
+    success_criteria:
+      response_keywords: ["v1", "rollback", "registry", "archived", "production"]
+      cluster_check:  # serving v1, registry stages updated, deployment and registry identities kept
+        command: >-
+          kubectl rollout status deployment/ml-service --timeout=60s >/dev/null 2>&1; sleep 5; f="";
+          curl -s -m 10 --retry 3 --retry-all-errors http://localhost:30081/health | grep -q mobilenet_v2 || f="$f not serving mobilenet_v2;";
+          s=$(kubectl get configmap model-registry -o json | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print(json.loads(d['resnet50.v2'])['stage'], json.loads(d['mobilenet_v2.v1'])['stage'])" 2>/dev/null);
+          [ "$s" = "archived production" ] || f="$f registry stages are '$s', expected v2 archived and v1 production;";
+          [ "$(kubectl get configmap model-registry -o jsonpath='{.metadata.uid}')" = "$(cat /tmp/eval-l3-registry.uid)" ] || f="$f registry was deleted and recreated;";
+          [ "$(kubectl get deployment ml-service -o jsonpath='{.metadata.uid}')" = "$(cat /tmp/eval-l3.uid)" ] || f="$f deployment was deleted and recreated;";
+          [ -z "$f" ] && echo PASS || echo "FAIL:$f"
+        expected: "PASS"
+        timeout: 90
+    setup_commands:
+      - "kubectl apply -f k8s/ml_service/deployment.yaml"
+      - "kubectl set image deployment/ml-service ml-service=copandrej/ml-service:v2"
+      - "kubectl rollout status deployment/ml-service --timeout=80s"
+      - "kubectl delete configmap model-registry --ignore-not-found"
+      - >-
+        kubectl create configmap model-registry
+        --from-literal=mobilenet_v2.v1='{"image": "copandrej/ml-service:v1", "stage": "archived", "val_accuracy": 0.712}'
+        --from-literal=resnet50.v2='{"image": "copandrej/ml-service:v2", "stage": "production", "val_accuracy": 0.761}'
+      - "kubectl get deployment ml-service -o jsonpath='{.metadata.uid}' > /tmp/eval-l3.uid"
+      - "kubectl get configmap model-registry -o jsonpath='{.metadata.uid}' > /tmp/eval-l3-registry.uid"
+    cleanup_commands:
+      - "kubectl delete configmap model-registry --ignore-not-found"
+      - "kubectl replace --force -f k8s/ml_service/deployment.yaml"

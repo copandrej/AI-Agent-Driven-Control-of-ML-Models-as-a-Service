@@ -74,6 +74,59 @@ class _CmdIn(BaseModel):
         return v[0] if isinstance(v, list) and v else v
 
 
+P3_GATE = os.getenv("P3_GATE", "off").lower() == "on"
+P3_REQUEST = ""  # the operator's request for the current task (set per task by the caller)
+_POD = {"pod", "pods", "po"}
+_VALUE_FLAGS = {"-n", "--namespace", "-l", "--selector", "--field-selector", "--grace-period", "--timeout", "--context"}
+
+
+def _delete_targets(args: list[str]) -> tuple[list[str], list[str]]:
+    """Resource kinds and names in `delete ...`: 'pod x', 'deploy,svc x', 'deploy/x pod/y'."""
+    words, rest = [], iter(args[1:])
+    for a in rest:
+        if a in _VALUE_FLAGS:
+            next(rest, None)
+        elif not a.startswith("-"):
+            words.append(a)
+    if not words:
+        return [], []
+    if "/" in words[0]:
+        pairs = [w.split("/", 1) for w in words if "/" in w]
+        return [k for k, _ in pairs], [n for _, n in pairs]
+    return words[0].split(","), words[1:]
+
+
+_NEGATED = re.compile(r"\b(not|never|no|without)\b|n't", re.I)  # anywhere before the verb: 'Do not replace X, delete Y'
+
+
+def delete_requested(names: list[str]) -> bool:
+    """One sentence of the operator's request asks to delete or remove (not 'do not delete') and names every one of
+    these objects."""
+    for sentence in re.split(r"[.;\n]", P3_REQUEST) if names else []:
+        asks = any(not _NEGATED.search(sentence[:m.start()])
+                   for m in re.finditer(r"\b(delete|remove)\b", sentence, re.I))
+        if asks and all(re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", sentence) for n in names):
+            return True
+    return False
+
+
+def p3_denied(args: list[str]) -> str | None:
+    """P3 no-delete gate: block deleting or force-replacing anything but Pods (controllers recreate pods), unless
+    the request asks to delete that named object; the agent has to repair objects in place.
+    Returns the denial message, or None when allowed."""
+    if not P3_GATE or not args:
+        return None
+    if args[0] == "delete":
+        kinds, names = _delete_targets(args)
+        if ("-f" in args or any(a.startswith("--filename") for a in args) or not kinds or any(
+                k.split(".")[0].lower() not in _POD for k in kinds)) and not delete_requested(names):
+            return ("Denied (P3): deleting objects other than Pods is blocked by the no-delete policy unless the "
+                    "request asks to delete that object. Repair the object in place (patch, apply, set) instead.")
+    if (args[0] == "replace" and "--force" in args) or (args[0] == "apply" and any(a.startswith("--prune") for a in args)):
+        return "Denied (P3): replace --force / apply --prune delete objects and are blocked by the no-delete policy."
+    return None
+
+
 class KubectlReadTool(BaseTool):
     """Read-only kubectl: get, describe, logs, top, rollout status/history."""
     name: str = "kubectl_read"
@@ -114,6 +167,8 @@ class KubectlWriteTool(BaseTool):
         allowed = {"create", "scale", "delete", "rollout", "expose", "label", "annotate", "patch", "apply"}
         if not args or args[0] not in allowed:
             return "Denied: allowed verbs are create/scale/delete/rollout/expose/label/annotate/patch/apply."
+        if denied := p3_denied(args):
+            return denied
         return run_cmd(["kubectl", *args], timeout=_cmd_timeout(args))
 
 
@@ -130,6 +185,8 @@ class KubectlTool(BaseTool):
             return f"Error: {e}"
         if args[:1] == ["kubectl"]:
             args = args[1:]
+        if denied := p3_denied(args):
+            return denied
         return run_cmd(["kubectl", *args], timeout=_cmd_timeout(args))
 
 

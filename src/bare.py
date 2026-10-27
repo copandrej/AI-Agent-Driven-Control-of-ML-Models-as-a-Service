@@ -12,7 +12,7 @@ os.environ.setdefault("LITELLM_LOG", os.getenv("LITELLM_LOG", "CRITICAL"))
 
 from crewai import Agent, Crew, Task
 
-from .agent import VERBOSE, clean_response
+from .agent import MAX_ITER, VERBOSE, clean_response
 from .tools import KubectlTool, PrometheusQueryTool
 
 
@@ -24,7 +24,7 @@ def run_bare(llm, user_input: str, history_context: str = "") -> str:
         llm=llm,
         tools=[KubectlTool(), PrometheusQueryTool()],
         verbose=VERBOSE,
-        max_iter=25,
+        max_iter=MAX_ITER,
         cache=False,  # tools read live cluster state; a cached result would be stale
     )
     prompt = history_context + user_input if history_context else user_input

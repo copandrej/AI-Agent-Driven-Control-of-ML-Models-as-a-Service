@@ -12,7 +12,8 @@ os.environ.setdefault("LITELLM_LOG", os.getenv("LITELLM_LOG", "CRITICAL"))
 from crewai import Agent, Crew, Task
 from crewai_tools import FileReadTool
 
-from .agent import build_context, clean_response, resolve_llm, VERBOSE
+from .agent import MAX_ITER, VERBOSE, build_context, clean_response, resolve_llm
+from .platform_tools import platform_tools
 from .tools import (
     ApplyManifestTool,
     GrafanaAlertsTool,
@@ -56,9 +57,9 @@ def run_simple(llm, user_input: str, history_context: str = "") -> str:
             "Never skip a tool call when the task requires live data or cluster mutation."
         ),
         llm=llm,
-        tools=ALL_TOOLS,
+        tools=ALL_TOOLS + platform_tools(),  # TOOLSET=platform: every MCP server connected
         verbose=VERBOSE,
-        max_iter=25,
+        max_iter=MAX_ITER,
         cache=False,  # tools read live cluster state; a cached result would be stale
     )
     prompt = history_context + user_input if history_context else user_input

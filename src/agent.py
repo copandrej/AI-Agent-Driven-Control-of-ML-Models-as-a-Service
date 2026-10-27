@@ -7,7 +7,6 @@ Routes: deploy | monitor | ingress | ops | general
 Agents: Orchestrator, Coding, Ops, Monitoring, Ingress — each with bounded tools.
 """
 
-import json
 import os
 import re
 
@@ -20,6 +19,7 @@ from crewai_tools import FileReadTool
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+from .platform_tools import platform_tools
 from .rag import ScopedMemory
 from .tools import (
     ApplyManifestTool,
@@ -31,7 +31,7 @@ from .tools import (
     PrometheusQueryTool,
     YAMLValidatorTool,
     clean_yaml,
-    run_cmd,
+    run_cmd,  # re-exported for eval/runner.py
 )
 
 load_dotenv()
@@ -40,6 +40,7 @@ load_dotenv()
 
 VERBOSE = os.getenv("VERBOSE", "False").lower() == "true"
 FORCE_REACT = os.getenv("FORCE_REACT", "True").lower() == "true"
+MAX_ITER = int(os.getenv("MAX_ITER", "25"))  # agent step budget (Kubeply tasks need ~50)
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "True").lower() == "true"
 MEMORY_PATH = os.getenv("MEMORY_PATH", ".crewai/chroma")
 MEMORY_COLLECTION = os.getenv("MEMORY_COLLECTION", "mlops_memories")
@@ -144,32 +145,6 @@ def clean_response(raw: str) -> str:
     return result
 
 
-def deployment_generations() -> dict[str, int]:
-    try:
-        items = json.loads(run_cmd(["kubectl", "get", "deploy", "-A", "-o", "json"], timeout=30))["items"]
-    except (ValueError, KeyError):
-        return {}
-    return {f"{d['metadata']['namespace']}/{d['metadata']['name']}": d["metadata"].get("generation", 0) for d in items}
-
-
-def with_observed_state(before: dict[str, int], report: str) -> str:
-    """P4 in the control flow: after a write route the system itself reads back every Deployment whose spec
-    changed and puts the observed state above the agent's report, whether or not the agent verified."""
-    if not before:
-        return report
-    after = deployment_generations()
-    lines = [f"- {key}: deleted" for key in before if key not in after]
-    for key, gen in after.items():
-        if before.get(key) != gen:
-            ns, name = key.split("/", 1)
-            status = run_cmd(["kubectl", "rollout", "status", f"deployment/{name}", "-n", ns, "--timeout=60s"], timeout=70)
-            done = "successfully rolled out" in status
-            lines.append(f"- {key}: " + ("rollout complete" if done else f"rollout NOT complete ({status.strip().splitlines()[-1]})"))
-    if not lines:
-        return report
-    return "[System check after the change]\n" + "\n".join(lines) + "\n\n" + report
-
-
 def build_context(history: list[dict]) -> str:
     if not history:
         return ""
@@ -210,7 +185,7 @@ class MlOpsFlow(Flow[AppState]):
     def _agent(self, role: str, goal: str, backstory: str, tools: list, llm: LLM | None = None) -> Agent:
         return Agent(
             role=role, goal=goal, backstory=backstory,
-            llm=llm or self.llm, tools=tools, verbose=VERBOSE, max_iter=25,
+            llm=llm or self.llm, tools=tools, verbose=VERBOSE, max_iter=MAX_ITER,
             cache=False,  # tools read live cluster state; a cached result would be stale
         )
 
@@ -252,11 +227,14 @@ class MlOpsFlow(Flow[AppState]):
                 "You classify requests. Return ONLY one word:\n"
                 "- deploy: ONLY when user needs a multi-resource YAML manifest written from scratch (e.g. deployment + service + ingress together)\n"
                 "- ops: ANY kubectl operation — create/scale/delete/update deployment, list/describe pods/nodes, "
-                "get logs, apply an existing manifest file, switch model version, call inference endpoints. "
+                "get logs, apply an existing manifest file, call inference endpoints. "
                 "If the user says 'create a deployment with image X' or 'deploy using manifest file Y', that is ops, NOT deploy. "
                 "If the user asks to fix something or take action, that is ops, even when metrics or latency are mentioned.\n"
                 "- monitor: read-only questions about Prometheus/PromQL metrics, Grafana alerts, latency percentiles\n"
                 "- ingress: ingress rules, traffic routing between services\n"
+                "- lifecycle: ML model lifecycle — train or retrain a model, model registry (register, list, promote or "
+                "archive versions), switch or roll back the served model version, batch inference, autoscaling or "
+                "CPU/memory resources of a model serving deployment\n"
                 "- general: greeting, question, conversation\n"
                 "Rule of thumb: if it can be done with a single kubectl command, it is ops. "
                 "Only use deploy when complex YAML generation is needed.\n"
@@ -267,11 +245,11 @@ class MlOpsFlow(Flow[AppState]):
         )
         result = self._run_crew(
             agent=orchestrator,
-            description=f"Classify this request into one word (deploy/ops/monitor/ingress/general): {self.state.user_input}",
-            expected="Single word: deploy, ops, monitor, ingress, or general",
+            description=f"Classify this request into one word (deploy/ops/monitor/ingress/lifecycle/general): {self.state.user_input}",
+            expected="Single word: deploy, ops, monitor, ingress, lifecycle, or general",
             scope="/project/mlops/orchestrator",
         )
-        match = re.search(r"\b(deploy|ops|monitor|ingress|general)\b", result.strip().lower())
+        match = re.search(r"\b(deploy|ops|monitor|ingress|lifecycle|general)\b", result.strip().lower())
         self.state.intent = match.group(1) if match else "ops"
         return self.state.intent
 
@@ -317,8 +295,7 @@ class MlOpsFlow(Flow[AppState]):
 
     @listen("yaml_valid")
     def ops_apply(self) -> str:
-        # P3: apply exactly the YAML the gate validated, with no LLM in between; the agent only verifies
-        before = deployment_generations()
+        # apply exactly the YAML the gate validated, with no LLM in between; the agent only verifies
         applied = ApplyManifestTool()._run(self.state.coding_output)
         ops = self._agent(
             role="Ops / Execution Agent",
@@ -332,7 +309,6 @@ class MlOpsFlow(Flow[AppState]):
             expected="Apply result with verification summary",
             scope="/project/mlops/ops",
         )
-        result = with_observed_state(before, result)
         self.state.final_response = result
         return result
 
@@ -365,16 +341,15 @@ class MlOpsFlow(Flow[AppState]):
                 "If asked to switch model version, call model_version_update. "
                 "If asked about pod status, call kubectl_read."
             ),
-            tools=[KubectlReadTool(), KubectlWriteTool(), ModelVersionTool(), InferenceClientTool(), PrometheusQueryTool()],
+            tools=[KubectlReadTool(), KubectlWriteTool(), ModelVersionTool(), InferenceClientTool(), PrometheusQueryTool(),
+                   *platform_tools("kubernetes", "helm")],
         )
-        before = deployment_generations()
         result = self._run_crew(
             agent=ops,
             description=f"Handle this cluster operation: {self.state.user_input}",
             expected="Clear summary of the operation result",
             scope="/project/mlops/ops",
         )
-        result = with_observed_state(before, result)
         self.state.final_response = result
         return result
 
@@ -400,13 +375,43 @@ class MlOpsFlow(Flow[AppState]):
                 "Never answer with assumed values. If Prometheus is unavailable, fall back to "
                 "inference_client for /metrics, then kubectl_read. Report what the tool returns."
             ),
-            tools=[PrometheusQueryTool(), GrafanaAlertsTool(), KubectlReadTool(), InferenceClientTool()],
+            tools=[PrometheusQueryTool(), GrafanaAlertsTool(), KubectlReadTool(), InferenceClientTool(),
+                   *platform_tools("prometheus")],
         )
         result = self._run_crew(
             agent=monitor,
             description=f"Handle this monitoring request: {self.state.user_input}",
             expected="Monitoring summary with actionable insights",
             scope="/project/mlops/prometheus",
+        )
+        self.state.final_response = result
+        return result
+
+    # ── Lifecycle Route ───────────────────────────────────────────────
+
+    @listen("lifecycle")
+    def lifecycle_step(self) -> str:
+        lifecycle = self._agent(
+            role="ML Lifecycle Agent",
+            goal="Manage model training, the model registry and model serving versions by calling tools",
+            backstory=(
+                "You manage the lifecycle of the ML models served on the cluster: training jobs, the model registry, "
+                "which model version is served, batch inference, autoscaling and resources of serving deployments. "
+                "ALWAYS call a tool — never guess cluster or registry state.\n"
+                "Tool usage rules:\n"
+                "- kubectl_read: inspect deployments, jobs, pods and the model registry (ConfigMap model-registry).\n"
+                "- model_version_update: REQUIRED for any switch or rollback of the served model version.\n"
+                "- inference_client: verify the served model, e.g. GET http://localhost:30081/health.\n"
+                "- kubectl_write: other mutations (patch, scale, create). Verify with kubectl_read after."
+            ),
+            tools=[KubectlReadTool(), KubectlWriteTool(), ModelVersionTool(), InferenceClientTool(),
+                   *platform_tools("ml_platform")],
+        )
+        result = self._run_crew(
+            agent=lifecycle,
+            description=f"Handle this ML lifecycle request: {self.state.user_input}",
+            expected="Clear summary of the lifecycle operation result",
+            scope="/project/mlops/lifecycle",
         )
         self.state.final_response = result
         return result
@@ -426,14 +431,12 @@ class MlOpsFlow(Flow[AppState]):
             ),
             tools=[KubectlReadTool(), KubectlWriteTool()],
         )
-        before = deployment_generations()
         result = self._run_crew(
             agent=ingress,
             description=f"Handle this networking request: {self.state.user_input}",
             expected="Networking action result and status",
             scope="/project/mlops/ingress",
         )
-        result = with_observed_state(before, result)
         self.state.final_response = result
         return result
 

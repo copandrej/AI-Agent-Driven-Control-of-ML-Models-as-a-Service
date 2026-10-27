@@ -89,30 +89,38 @@ class TraceRecorder:
 
 def _fingerprint(item: dict) -> dict:
     kind = item["kind"]
+    if kind == "Pod":
+        return {}
+    uid = item["metadata"].get("uid")  # a changed uid means the object was deleted and recreated
     if kind == "Deployment":
         spec = item["spec"]
         return {
             "generation": item["metadata"].get("generation"),
             "replicas": spec.get("replicas"),
             "images": [c["image"] for c in spec["template"]["spec"]["containers"]],
+            "uid": uid,
         }
-    if kind == "Pod":
-        return {}
-    body = json.dumps(item.get("spec", item.get("data")), sort_keys=True)
-    return {"hash": hashlib.sha1(body.encode()).hexdigest()[:8]}
+    rbac = {k: item.get(k) for k in ("rules", "subjects", "roleRef")}
+    body = json.dumps(item.get("spec", item.get("data", rbac)), sort_keys=True)
+    return {"hash": hashlib.sha1(body.encode()).hexdigest()[:8], "uid": uid}
+
+
+# One kind per call: a kind whose CRD is missing on a cluster (servicemonitor on kind) must not empty the snapshot
+SNAPSHOT_KINDS = ["deploy", "sts", "ds", "job", "cronjob", "svc", "cm", "secret", "networkpolicy", "ingress", "pvc",
+                  "hpa", "role", "rolebinding", "sa", "servicemonitor", "pod"]
 
 
 def snapshot() -> dict[str, dict]:
-    raw = run_cmd(["kubectl", "get", "deploy,svc,cm,ingress,pod,servicemonitor,hpa", "-A", "-o", "json"], timeout=30)
-    try:
-        items = json.loads(raw)["items"]
-    except (ValueError, KeyError):
-        return {}
-    return {
-        f"{i['kind']}/{i['metadata'].get('namespace', '')}/{i['metadata']['name']}": _fingerprint(i)
-        for i in items
-        if "deletionTimestamp" not in i["metadata"]  # terminating = already gone
-    }
+    out = {}
+    for kind in SNAPSHOT_KINDS:
+        try:
+            items = json.loads(run_cmd(["kubectl", "get", kind, "-A", "-o", "json"], timeout=30))["items"]
+        except (ValueError, KeyError):
+            continue
+        for i in items:
+            if "deletionTimestamp" not in i["metadata"]:  # terminating = already gone
+                out[f"{i['kind']}/{i['metadata'].get('namespace', '')}/{i['metadata']['name']}"] = _fingerprint(i)
+    return out
 
 
 def state_diff(before: dict, after: dict) -> dict:

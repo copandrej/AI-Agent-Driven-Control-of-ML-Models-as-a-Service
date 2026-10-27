@@ -47,6 +47,7 @@ for _name in ["crewai", "litellm", "httpx", "openai", "chromadb", "httpcore", "u
     _log.setLevel(logging.CRITICAL)
     _log.propagate = False
 
+from src import tools as agent_tools
 from src.agent import MlOpsFlow, resolve_llm, run_cmd
 from eval import telemetry
 from eval.task_trace import TraceRecorder, fault_facts, snapshot, state_diff
@@ -185,7 +186,7 @@ def check_cluster_state(cluster_check: dict | None, response: str = "") -> dict 
     if not cluster_check:
         return None
     cmd = cluster_check["command"]
-    actual = run_cmd(cmd, timeout=60)  # checks may wait for a rollout before reading state
+    actual = run_cmd(cmd, timeout=cluster_check.get("timeout", 60))  # checks may wait for a rollout before reading state
     actual_norm = "" if actual.strip() in ("(no output)", "(no resources found)", "") else actual.strip()
     if cluster_check.get("in_response"):
         # Verify the actual cluster value appears verbatim in the agent's response.
@@ -278,6 +279,25 @@ _RUNNERS = {
     "bare": run_bare_task,
 }
 
+P4 = os.getenv("P4", "off").lower()  # off | detect | feedback (src/verify.py)
+
+
+def run_task(llm, architecture: str, prompt: str, log_path: Path | None) -> dict:
+    """The architecture's runner, wrapped in P4 goal verification when P4 is on."""
+    agent_tools.P3_REQUEST = prompt  # the P3 gate lets through deletes this request asks for
+    if P4 not in ("detect", "feedback"):
+        return _RUNNERS[architecture](llm, prompt, log_path)
+    from src.verify import run_verified
+    start, last = time.time(), {}
+
+    def execute(p: str) -> str:
+        last.update(_RUNNERS[architecture](llm, p, log_path))
+        return last["response"]
+
+    with suppress_agent_output(log_path):
+        response, rounds = run_verified(execute, llm, prompt, feedback=P4 == "feedback")
+    return {**last, "response": response, "elapsed": round(time.time() - start, 2), "p4": rounds}
+
 
 # ---------------------------------------------------------------------------
 # Terminal progress display
@@ -333,8 +353,9 @@ def run_single_task(
     telemetry.set_task(task_id)
     started_at = datetime.now(timezone.utc).isoformat()
     with TraceRecorder() as trace:
-        result = _RUNNERS[architecture](llm, task["prompt"], log_path)
+        result = run_task(llm, architecture, task["prompt"], log_path)
     finished_at = datetime.now(timezone.utc).isoformat()
+    context = telemetry.context_stats()
     telemetry.set_task(None)
     vllm = telemetry.counter_delta(counters, telemetry.vllm_counters())
     diff = state_diff(before, snapshot())
@@ -369,6 +390,7 @@ def run_single_task(
         "stop": ("error" if result["response"].startswith("Error:")
                  else "empty" if result["response"].startswith("[Agent produced empty response") else "answer"),
         "vllm": vllm,
+        "context": context,
         "response": result["response"][:2000],
     }
     # Only emit cluster_check when it was actually run (non-null) — it is the ground-truth
@@ -381,6 +403,8 @@ def run_single_task(
     # Compact fault-analysis facts: route (flow only), tool calls, cluster state changes
     if "route" in result:
         record["route"] = result["route"]
+    if "p4" in result:
+        record["p4"] = result["p4"]
     record["trace"] = trace.steps
     record["diff"] = diff
     if restored:
@@ -455,6 +479,8 @@ def run_evaluation(
         tasks = [t for t in tasks if t["level"] in levels]
     if task_ids:
         tasks = [t for t in tasks if t["id"] in task_ids]
+    if os.getenv("TOOLSET", "core").lower() != "platform":  # tasks that need the platform tools
+        tasks = [t for t in tasks if t.get("toolset") != "platform"]
 
     levels_str = " ".join(f"L{l}" for l in sorted(levels)) if levels else "L1 L2"
     print(f"\n{'='*70}")
@@ -477,6 +503,8 @@ def run_evaluation(
         "llm_model": llm.model,
         **telemetry.server_info(),
         "temperature": llm.temperature,
+        # principle switches and budgets (env), so every result file says which arm it is
+        "config": {k: os.getenv(k, "") for k in ("P3_GATE", "P4", "TOOLSET", "MAX_ITER", "LLM_TIMEOUT")},
         "git_commit": run_cmd(["git", "rev-parse", "--short", "HEAD"]),
         "calls_file": calls_path.name,
         "timestamp": datetime.now(timezone.utc).isoformat(),
