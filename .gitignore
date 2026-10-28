@@ -211,3 +211,4 @@ eval/results/
 eval/archive/
 # Plotting scripts (temporary, local only)
 eval/plot_*.py
+.vscode/

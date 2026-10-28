@@ -121,7 +121,7 @@ def _begin(kwargs: dict) -> dict:
     return record
 
 
-def _failed(record: dict, t0: float, e: Exception) -> None:
+def _failed(record: dict, t0: float, e: BaseException) -> None:
     if type(e).__name__ == "ContextWindowExceededError":
         _ctx["overflows"][record["agent"]] = _ctx["overflows"].get(record["agent"], 0) + 1
     _write({**record, "duration_s": round(time.monotonic() - t0, 3), "error": type(e).__name__})
@@ -159,7 +159,7 @@ def _recorded_completion(*args, **kwargs):
     record, t0 = _begin(kwargs), time.monotonic()
     try:
         response = _completion(*args, **kwargs)
-    except Exception as e:
+    except BaseException as e:  # incl. CancelledError (crewai cancels parallel summary calls)
         _failed(record, t0, e)
         raise
     _finish(record, t0, response)
@@ -173,7 +173,7 @@ async def _recorded_acompletion(*args, **kwargs):
     record, t0 = _begin(kwargs), time.monotonic()
     try:
         response = await _acompletion(*args, **kwargs)
-    except Exception as e:
+    except BaseException as e:  # incl. CancelledError (crewai cancels parallel summary calls)
         _failed(record, t0, e)
         raise
     _finish(record, t0, response)

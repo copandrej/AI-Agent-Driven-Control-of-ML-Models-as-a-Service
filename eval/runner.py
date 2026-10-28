@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -482,7 +483,7 @@ def run_evaluation(
     if os.getenv("TOOLSET", "core").lower() != "platform":  # tasks that need the platform tools
         tasks = [t for t in tasks if t.get("toolset") != "platform"]
 
-    levels_str = " ".join(f"L{l}" for l in sorted(levels)) if levels else "L1 L2"
+    levels_str = " ".join(f"L{l}" for l in sorted({t["level"] for t in tasks}))
     print(f"\n{'='*70}")
     print(f"  arch={architecture}  model={llm.model}  levels={levels_str}  tasks={len(tasks)}")
     if log_path:
@@ -509,7 +510,8 @@ def run_evaluation(
         "calls_file": calls_path.name,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tasks_file": tasks_path,
-        "levels": levels or [1, 2],
+        "levels": sorted({t["level"] for t in tasks}),
+        "host": socket.gethostname(),
         "task_ids": task_ids,
         "log_file": str(log_path) if log_path else None,
         "status": "in_progress",
